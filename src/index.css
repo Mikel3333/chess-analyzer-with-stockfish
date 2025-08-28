@@ -13,6 +13,11 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+html, body {
+  height: 100%;
+  overflow: hidden; /* prevent page-level scroll; use pane scrolls instead */
+}
+
 a {
   font-weight: 500;
   color: #646cff;
@@ -81,26 +86,29 @@ body {
 #root {
   width: 100%;
   height: 100vh;
+  overflow: hidden; /* lock viewport, panes handle their own scroll */
 }
 
 /* Layout classes */
 .app-container {
-  min-height: 100vh;
+  height: 100vh;
   background-color: #111827;
   color: white;
+  overflow: hidden; /* prevent outer scroll */
 }
 
 .main-layout {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden; /* children scroll individually */
 }
 
 .left-section {
   flex: 1;
-  padding: 24px;
+  padding: 0 24px 24px 24px; /* nempel ke atas */
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100vh; /* fix height agar scroll di dalam, bukan di halaman */
   overflow-y: auto;
 }
 
@@ -124,6 +132,8 @@ body {
   height: calc(100vh - 48px);
   overflow-y: auto;
   overflow-x: hidden;
+  /* space for fixed bottom nav */
+  padding-bottom: 88px;
 }
 
 .right-panel-content.blurred {
@@ -143,16 +153,6 @@ body {
   z-index: 5;
 }
 
-.right-panel-content {
-  padding: 24px;
-  display: flex;
-  flex-direction: column;
-  gap: 24px;
-  flex: 1;
-  height: calc(100vh - 48px);
-  overflow-y: auto;
-  overflow-x: hidden;
-}
 
 /* Right Panel Components */
 .card {
@@ -231,17 +231,44 @@ body {
   background-color: #111827;
 }
 
-.stats-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
+.accuracy-wrapper {
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
   gap: 12px;
-  font-size: 14px;
+  margin-bottom: 16px;
+  width: 100%;
+}
+
+.accuracy-wrapper .stat-item {
+  flex: 0 0 150px;
+  width: 150px;
 }
 
 .stat-item {
   background-color: #1f2937;
   border-radius: 8px;
   padding: 12px;
+  width: 150px !important;
+  max-width: 150px !important;
+  min-width: 150px !important;
+  flex-shrink: 0 !important;
+  flex-grow: 0 !important;
+  flex-basis: 150px !important;
+  display: block !important;
+  box-sizing: border-box !important;
+}
+
+.stat-item.stats-white {
+  background-color: #ffffff !important;
+  color: #111111 !important;
+  border: 1px solid #e5e7eb;
+}
+
+.stat-item.stats-black {
+  background-color: #111827 !important;
+  color: #ffffff !important;
+  border: 1px solid #1f2937;
 }
 
 .stat-label {
@@ -250,9 +277,25 @@ body {
   margin-bottom: 4px;
 }
 
+.stat-item.stats-white .stat-label {
+  color: #374151 !important;
+}
+
+.stat-item.stats-black .stat-label {
+  color: #d1d5db !important;
+}
+
 .stat-value.accuracy {
   color: #10b981;
   font-weight: 600;
+}
+
+.stat-item.stats-white .stat-value.accuracy {
+  color: #111827 !important;
+}
+
+.stat-item.stats-black .stat-value.accuracy {
+  color: #ffffff !important;
 }
 
 .stat-value.rating {
@@ -316,8 +359,9 @@ body {
   width: 100%;
   height: 150px;
   overflow: hidden;
+  background-color: #1a1a1ab7; /* black background to match desired look */
 }
-
+  
 /* Move List */
 .move-list {
   max-height: none;
@@ -326,6 +370,27 @@ body {
   flex-direction: column;
   gap: 4px;
   font-size: 14px;
+}
+
+/* ===============================
+   Scrollbars: hidden (keep scroll)
+   =============================== */
+/* Hide for all textareas */
+textarea {
+  scrollbar-width: none; /* Firefox */
+}
+textarea::-webkit-scrollbar { /* WebKit */
+  width: 0;
+  height: 0;
+}
+
+/* Helper class to hide scrollbars on any scrollable element */
+.scrollbar-none {
+  scrollbar-width: none; /* Firefox */
+}
+.scrollbar-none::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 .move-item {
@@ -401,14 +466,16 @@ body {
 .pgn-input-section {
   background-color: #1f2937;
   border-radius: 12px;
-  padding: 12px;
-  margin-bottom: 24px;
+  padding: 8px; /* compact */
 }
+
+/* Pastikan elemen terakhir di dalam PGN wrapper tidak menyisakan margin */
+.pgn-input-section > *:last-child { margin-bottom: 0 !important; }
 
 .pgn-input-row {
   display: flex;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 
 .pgn-input-row:last-child {
@@ -417,16 +484,16 @@ body {
 
 .file-input {
   flex: 1;
-  font-size: 14px;
+  font-size: 13px; /* compact */
   color: #d1d5db;
 }
 
 .file-input::file-selector-button {
   margin-right: 16px;
-  padding: 8px 16px;
+  padding: 6px 10px; /* compact */
   border-radius: 8px;
   border: none;
-  font-size: 14px;
+  font-size: 13px; /* compact */
   font-weight: 600;
   background-color: #4b5563;
   color: white;
@@ -438,12 +505,12 @@ body {
 }
 
 .btn-example {
-  padding: 8px 12px;
+  padding: 6px 10px; /* compact */
   border-radius: 8px;
   background-color: #4b5563;
   color: white;
   border: none;
-  font-size: 14px;
+  font-size: 13px; /* compact */
   white-space: nowrap;
   cursor: pointer;
 }
@@ -454,13 +521,13 @@ body {
 
 .textarea-pgn {
   flex: 1;
-  height: 60px;
+  height: 44px; /* compact */
   border-radius: 8px;
   border: 1px solid #4b5563;
   background-color: #374151;
-  padding: 12px;
+  padding: 8px; /* compact */
   font-family: monospace;
-  font-size: 14px;
+  font-size: 13px; /* compact */
   color: white;
   resize: none;
 }
@@ -470,12 +537,13 @@ body {
 }
 
 .btn-analyze {
-  padding: 8px 24px;
+  padding: 6px 14px; /* compact */
   border-radius: 8px;
   background-color: #2563eb;
   color: white;
   border: none;
   font-weight: 600;
+  font-size: 13px; /* compact */
   white-space: nowrap;
   cursor: pointer;
 }
@@ -501,15 +569,16 @@ body {
 /* Chess Board Section */
 .board-container {
   display: flex;
-  align-items: center;
+  align-items: flex-start; /* posisi lebih ke atas */
   justify-content: center;
-  min-height: 600px;
+  min-height: 0; /* jangan paksa tinggi besar */
 }
 
 .board-wrapper {
   background-color: #1f2937;
   border-radius: 16px;
-  padding: 24px;
+  padding: 10px; /* hilangkan jarak internal atas */
+  margin-top: -1px; /* overlap 1px untuk menutup celah tipis */
 }
 
 .board-with-eval {
@@ -518,7 +587,8 @@ body {
   align-items: start;
   justify-content: center;
   column-gap: 20px;
-  margin-bottom: 16px;
+  margin-bottom: 0px;
+  margin-top: 0px;
 }
 
 /* Navigation Controls */
@@ -530,10 +600,22 @@ body {
   margin-top: 12px;
   padding: 8px;
   background-color: #1f2937;
-  border-radius: 8px;
   border: 2px solid #374151;
   width: 100%;
   box-sizing: border-box;
+}
+
+/* Fixed bottom wrapper for nav inside right panel */
+.right-panel-nav {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0; /* let nav-controls span full panel width */
+  background: linear-gradient(180deg, rgba(17,24,39,0) 0%, rgba(17,24,39,0.6) 20%, rgba(17,24,39,0.9) 60%);
+  box-sizing: border-box;
+  z-index: 4;
+  width: 100%;
 }
 
 .nav-btn {
@@ -546,8 +628,8 @@ body {
   transition: all 0.2s;
   font-size: 16px;
   font-weight: bold;
-  min-width: 40px;
-  min-height: 32px;
+  width: 70px;
+  height: 45px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -567,46 +649,4 @@ body {
   transform: none;
 }
 
-.nav-slider {
-  flex: 1;
-  margin: 0 20px;
-  max-width: 250px;
-  min-width: 150px;
-}
 
-.nav-slider input[type="range"] {
-  width: 100%;
-  height: 8px;
-  border-radius: 4px;
-  background: #4b5563;
-  outline: none;
-  accent-color: #2563eb;
-  cursor: pointer;
-  -webkit-appearance: none;
-  appearance: none;
-}
-
-.nav-slider input[type="range"]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #2563eb;
-  cursor: pointer;
-  border: 2px solid white;
-}
-
-.nav-slider input[type="range"]::-moz-range-thumb {
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #2563eb;
-  cursor: pointer;
-  border: 2px solid white;
-}
-
-.nav-slider input[type="range"]:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}

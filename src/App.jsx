@@ -10,6 +10,9 @@ import {
   Tooltip,
   CartesianGrid,
   ResponsiveContainer,
+  Area,
+  ComposedChart,
+  ReferenceLine,
 } from "recharts";
 
 // --- Evaluation Bar Component ---
@@ -28,10 +31,18 @@ function EvaluationBar({ evaluation, sideToMove }) {
   // Convert evaluation (UCI relative to side-to-move) → White perspective pawns
   const evalToWhitePawns = () => {
     if (!evaluation) return 0;
-    if ('mate' in evaluation) {
-      const m = Number(evaluation.mate);
+    // Prefer mate reported in multipv rank#1 if top-level doesn't carry it
+    const pv1Mate = (() => {
+      try {
+        const pv1 = Array.isArray(evaluation.multipv) ? evaluation.multipv.find(x => x.rank === 1) : null;
+        if (pv1 && ('mate' in pv1)) return Number(pv1.mate);
+      } catch {}
+      return null;
+    })();
+    const mateVal = ('mate' in evaluation) ? Number(evaluation.mate) : pv1Mate;
+    if (mateVal != null) {
       // Mate score is relative to side-to-move. Convert to White perspective.
-      const mWhite = sideToMove === 'w' ? m : -m;
+      const mWhite = sideToMove === 'w' ? mateVal : -mateVal;
       // Use a large sentinel to map to near-edges; actual percentage handled below
       return mWhite > 0 ? 10 : -10;
     }
@@ -45,10 +56,17 @@ function EvaluationBar({ evaluation, sideToMove }) {
   // Numeric label text (White perspective)
   const getWhiteAdvText = () => {
     if (!evaluation) return '0.0';
-    if ('mate' in evaluation) {
-      const m = Number(evaluation.mate);
-      if (m === 0) return 'Checkmate';
-      const mWhite = sideToMove === 'w' ? m : -m;
+    const pv1Mate = (() => {
+      try {
+        const pv1 = Array.isArray(evaluation.multipv) ? evaluation.multipv.find(x => x.rank === 1) : null;
+        if (pv1 && ('mate' in pv1)) return Number(pv1.mate);
+      } catch {}
+      return null;
+    })();
+    const mRaw = ('mate' in evaluation) ? Number(evaluation.mate) : pv1Mate;
+    if (mRaw != null) {
+      if (mRaw === 0) return 'Checkmate';
+      const mWhite = sideToMove === 'w' ? mRaw : -mRaw;
       return (mWhite >= 0 ? '' : '-') + 'M' + Math.abs(mWhite);
     }
     if ('cp' in evaluation) {
@@ -131,7 +149,7 @@ function EvaluationBar({ evaluation, sideToMove }) {
         fontSize: '12px',
         fontWeight: 600,
         fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif',
-        color: '#333'
+        color: '#fff'
       }}>
         {labelText}
       </div>
@@ -225,8 +243,12 @@ function isSacrificeMove(fen, san, moverSide) {
 function offersSacrificeNextMove(fen, san, moverSide) {
   try {
     const before = new Chess(fen);
+    const wasInCheck = before.in_check();
     const move = before.move(san, { sloppy: true });
     if (!move) return false;
+    // Hanya anggap "offered sacrifice" jika LANGKAHNYA BUKAN CAPTURE.
+    // Jika langkah adalah capture (mis. qxg3), itu biasanya trade/recapture dan bukan offering.
+    if (move.flags && move.flags.includes('c')) return false;
     const after = before; // board now at position after mover's move
     const scoAfter = materialScore(after);
     const opponentMoves = after.moves({ verbose: true });
@@ -238,7 +260,10 @@ function offersSacrificeNextMove(fen, san, moverSide) {
         test.move({ from: om.from, to: om.to, promotion: om.promotion });
         const scoCap = materialScore(test);
         const delta = (moverSide === 'w') ? (scoCap.w - scoAfter.w) : (scoCap.b - scoAfter.b);
-        if (delta <= -3) return true; // pelaku langkah kehilangan ≥3 setelah tangkapan terbaik
+        // Jika sebelumnya sedang skak dan langkah ini hanya "menutup skak",
+        // naikkan ambang pengorbanan agar tidak gampang disebut Brilliant.
+        const threshold = wasInCheck ? -5 : -3; // butuh ≥5 pion saat menutup skak
+        if (delta <= threshold) return true; // pelaku langkah kehilangan materi besar setelah tangkapan terbaik
       }
     }
     return false;
@@ -280,20 +305,44 @@ function evalToCpForSide(ev, side) {
   return null;
 }
 
+// Map mate distance to a large centipawn-like score that preserves distance.
+// Example: mate +3 -> +97,000; mate +1 -> +99,000; mate -3 -> -97,000, etc.
+function mateToScore(mate) {
+  const base = 100000;
+  const step = 1000; // distance granularity
+  const n = Math.min(99, Math.abs(Number(mate) || 0));
+  return Math.sign(mate) * (base - n * step);
+}
+
 // Classify a move by loss against engine best (in centipawns), mover's perspective.
 function classifyMoveByDelta(bestCp, playedCp, flags) {
   // bestCp/playedCp: higher is better for mover
   // loss = best - played (>=0 means worse than best)
   const loss = (bestCp ?? 0) - (playedCp ?? 0);
-  const absLoss = Math.abs(loss);
 
   // Miss (taktik terlewat)
   if (flags?.bestIsMate || (bestCp != null && bestCp >= 300)) {
     if (playedCp != null && playedCp <= 50) return "Miss";
   }
 
+  // If both best and played still mate for mover, classify by mate-distance delta instead of raw cp
+  if (typeof flags?.deltaMateForMover === 'number') {
+    const d = flags.deltaMateForMover; // >0 means slower mate; <0 faster
+    if (d < 0) return "Best";                // faster mate
+    if (d === 0) return "Best";              // same mate distance
+    if (d === 1) return "Excellent";         // one ply slower
+    if (d <= 3) return "Good";               // a few plies slower
+    if (d <= 6) return "Inaccuracy";         // noticeably slower
+    if (d <= 10) return "Mistake";           // much slower but still winning
+    // Only call blunder if mate distance explodes massively
+    return "Mistake";
+  }
+
+  // Jika langkah LEBIH BAIK dari PV#1 (loss < 0), jangan dihukum: anggap 'Best'
+  if (loss < -10) return "Best";
+
   // Blunder: sangat buruk atau membalik hasil besar → netral/berlawanan
-  if (absLoss > 300 ||
+  if (loss > 300 ||
       (bestCp != null && playedCp != null && (
         (bestCp >= 300 && playedCp <= 0) ||
         (bestCp <= -300 && playedCp >= 0)
@@ -301,11 +350,11 @@ function classifyMoveByDelta(bestCp, playedCp, flags) {
     return "Blunder";
   }
 
-  if (absLoss <= 10) return "Best";        // sama PV#1 atau selisih ≤10cp
-  if (absLoss <= 20) return "Excellent";
-  if (absLoss <= 50) return "Good";
-  if (absLoss <= 150) return "Inaccuracy";
-  if (absLoss <= 300) return "Mistake";
+  if (loss <= 10) return "Best";        // sama PV#1 atau selisih ≤10cp
+  if (loss <= 20) return "Excellent";
+  if (loss <= 50) return "Good";
+  if (loss <= 150) return "Inaccuracy";
+  if (loss <= 300) return "Mistake";
   return "Blunder";
 }
 
@@ -739,7 +788,7 @@ export default function App() {
 
       // Normalisasi ke perspektif mover dalam centipawns
       let bestCp;
-      if ("mate" in best) bestCp = Math.sign(best.mate) * 100000; else bestCp = best.cp;
+      if ("mate" in best) bestCp = mateToScore(best.mate); else bestCp = best.cp;
 
       let playedCp;
       if ("mate" in after) {
@@ -748,12 +797,21 @@ export default function App() {
           // Dari perspektif pelaku langkah: ini kemenangan maksimum
           playedCp = 100000;
         } else {
-          playedCp = -Math.sign(after.mate) * 100000; // flip karena setelah langkah giliran lawan
+          // Flip tanda karena setelah langkah giliran lawan
+          playedCp = -mateToScore(after.mate);
         }
       } else playedCp = -after.cp; // flip cp
 
+      // Compute mate distance delta for mover if applicable
+      const bestMateForMover = ("mate" in best && Math.sign(best.mate) > 0) ? Math.abs(best.mate) : null;
+      const playedMateForMover = ("mate" in after && (after.mate === 0 || Math.sign(after.mate) < 0)) ? Math.abs(after.mate) : null;
+      const deltaMateForMover = (bestMateForMover != null && playedMateForMover != null)
+        ? (playedMateForMover - bestMateForMover)
+        : null;
+
       let tag = classifyMoveByDelta(bestCp, playedCp, {
-        bestIsMate: "mate" in best && Math.sign(best.mate) > 0 // mate untuk mover
+        bestIsMate: "mate" in best && Math.sign(best.mate) > 0, // mate untuk mover
+        deltaMateForMover
       });
 
       const deltaCp = (bestCp ?? 0) - (playedCp ?? 0);
@@ -764,17 +822,31 @@ export default function App() {
       const bestSan = bestUci ? uciToSan(fens[i], bestUci) : null;
       const playedSan = sans[i];
 
-      // If the played move equals engine best (SAN match), force 'Best'.
-      // Additionally, if move offers a clear material sacrifice next move (≥3 pawns), mark as 'Brilliant'.
+      // If the played move equals engine best (SAN match), default to 'Best'.
+      // Upgrade to 'Brilliant' only if it is a genuine sacrifice AND either:
+      //  (a) it's an only-move (alternatives lose ≥150cp), or
+      //  (b) PV#1 has a sizable gap vs PV#2 (≥200cp), indicating a tactically unique resource.
       if (bestSan && playedSan && playedSan === bestSan) {
+        let upgradeBrilliant = false;
         const offered = offersSacrificeNextMove(fens[i], playedSan, moverSide);
-        tag = offered ? 'Brilliant' : 'Best';
+        if (offered) {
+          // compute onlyMove and pv gap using current pvList
+          let pvGap = 0;
+          if (pvList.length >= 2) {
+            const getCp = (item) => ('mate' in item) ? mateToScore(item.mate) : (item.cp);
+            const pv1 = pvList.find(x => x.rank === 1);
+            const pv2 = pvList.find(x => x.rank === 2);
+            if (pv1 && pv2) pvGap = getCp(pv1) - getCp(pv2);
+          }
+          upgradeBrilliant = (pvGap >= 200);
+        }
+        tag = (offered && (upgradeBrilliant)) ? 'Brilliant' : 'Best';
       }
 
       // Compute only-move: all alternatives lose >=150cp vs best for mover
       let onlyMove = false;
       if (bestSan && playedSan && playedSan === bestSan && pvList.length >= 2) {
-        const getCp = (item) => ('mate' in item) ? (Math.sign(item.mate) * 100000) : (item.cp);
+        const getCp = (item) => ('mate' in item) ? mateToScore(item.mate) : (item.cp);
         const bestItem = pvList.find(x => x.rank === 1);
         const bestItemCp = bestItem ? getCp(bestItem) : null;
         if (bestItemCp != null) {
@@ -801,8 +873,8 @@ export default function App() {
   // Calculate player statistics based on move analysis
   const playerStats = useMemo(() => {
     const stats = {
-      white: { accuracy: 0, gameRating: 1200, totalMoves: 0, goodMoves: 0 },
-      black: { accuracy: 0, gameRating: 1200, totalMoves: 0, goodMoves: 0 }
+      white: { accuracy: 0, totalMoves: 0, goodMoves: 0, extraPenalty: 0, counts: { best:0, excellent:0, good:0, inaccuracy:0, mistake:0, blunder:0, miss:0 } },
+      black: { accuracy: 0, totalMoves: 0, goodMoves: 0, extraPenalty: 0, counts: { best:0, excellent:0, good:0, inaccuracy:0, mistake:0, blunder:0, miss:0 } }
     };
 
     // Calculate accuracy and performance rating based on move quality
@@ -817,26 +889,135 @@ export default function App() {
       stats[player].totalMoves++;
 
       // Calculate centipawn loss
-      let bestCp = ("mate" in best) ? Math.sign(best.mate) * 100000 : best.cp;
+      let bestCp;
+      if ("mate" in best) bestCp = mateToScore(best.mate); else bestCp = best.cp;
 
       let playedCp;
       if ("mate" in after) {
         // Jika setelah langkah posisi adalah mate (mate==0), berarti pelaku langkah memberi skakmat → +INF
-        playedCp = (after.mate === 0) ? 100000 : (-Math.sign(after.mate) * 100000);
+        playedCp = (after.mate === 0) ? 100000 : (-mateToScore(after.mate));
       } else {
         playedCp = -after.cp;
       }
       
       const cpLoss = Math.max(0, (bestCp ?? 0) - (playedCp ?? 0));
 
-      // Tighter, CPL-driven accuracy curve (closer to chess.com)
-      // Heavier penalties for medium/large mistakes; light penalty for small inaccuracies.
-      // acc(cp) = 100 - 0.45 * (cpLoss^0.88)
-      // Examples: 10cp ≈ 96.6, 20cp ≈ 94.5, 50cp ≈ 86, 100cp ≈ 74.8, 200cp ≈ 52, 300cp ≈ 30
-      const moveAccuracy = Math.max(0, 100 - 0.45 * Math.pow(cpLoss, 0.88));
+      // --- Per-move accuracy with edge case handling ---
+      let moveAccuracy;
+
+      // H0. Hybrid perfect-move detection
+      //  - 100% if played SAN equals PV#1 SAN
+      //  - 100% if played SAN equals any PV whose score is within 5cp of PV#1
+      //  - 100% if cpLoss <= 5 (treat tiny drift as zero loss)
+      const pvList = Array.isArray(best.multipv) ? best.multipv : [];
+      const playedSan = sans[i];
+      let forcedPerfect = false;
+      try {
+        const getCpFromItem = (item) => (( 'mate' in item) ? mateToScore(item.mate) : item.cp);
+        const pv1 = pvList.find(x => x.rank === 1);
+        const pv1Uci = best.bestmoveUci || (pv1 ? pv1.uci : null);
+        const pv1San = pv1Uci ? uciToSan(fens[i], pv1Uci) : null;
+        if (pv1San && playedSan && playedSan === pv1San) {
+          forcedPerfect = true;
+        } else if (pv1) {
+          const pv1Cp = getCpFromItem(pv1);
+          // Look for any near-equal PV (<=10cp difference) matching played SAN
+          for (const alt of pvList) {
+            if (alt.rank === 1) continue;
+            const altCp = getCpFromItem(alt);
+            if (Number.isFinite(pv1Cp) && Number.isFinite(altCp) && Math.abs(pv1Cp - altCp) <= 10) {
+              const altSan = alt.uci ? uciToSan(fens[i], alt.uci) : null;
+              if (altSan && playedSan && playedSan === altSan) {
+                forcedPerfect = true;
+                break;
+              }
+            }
+          }
+        }
+      } catch {}
+      // Do not force perfect if the move accelerates mate against the mover
+      try {
+        const beforeMateAgainst = ("mate" in best && Math.sign(best.mate) < 0) ? Math.abs(best.mate) : null;
+        const afterMateAgainst = ("mate" in after && Math.sign(after.mate) > 0) ? Math.abs(after.mate) : null;
+        if (forcedPerfect && beforeMateAgainst != null && afterMateAgainst != null && afterMateAgainst < beforeMateAgainst) {
+          forcedPerfect = false;
+        }
+      } catch {}
+      if (!forcedPerfect && cpLoss <= 10) forcedPerfect = true;
+
+      if (forcedPerfect) {
+        moveAccuracy = 100;
+      } else if ("mate" in after && after.mate === 0) {
+        // A. If move delivers mate immediately → 100
+        moveAccuracy = 100;
+      } else if ("mate" in best && Math.sign(best.mate) > 0) {
+        // B. Best has mate for mover but played misses it → heavy penalty
+        moveAccuracy = 30; // cap
+      } else {
+        // C. Base curve (tighter CPL penalty)
+        const baseAcc = Math.max(0, 100 - 0.45 * Math.pow(cpLoss, 0.88));
+
+        // D. Criticality weighting only when there is an actual loss
+        const eqFactor = (() => {
+          const eq = Math.exp(-Math.pow((Math.min(Math.abs(bestCp), 200)) / 120, 2)); // 0..1
+          return 0.7 + 0.3 * eq; // 0.7..1.0 (closer to 1 when position ~ even)
+        })();
+
+        moveAccuracy = baseAcc * eqFactor;
+
+        // E. Trivial recapture boost: if move is capture that restores/keeps material and cpLoss small
+        try {
+          const g0 = new Chess(fens[i]);
+          const m = g0.move(sans[i], { sloppy: true });
+          if (m && m.flags.includes('c')) {
+            const beforeMat = materialScore(new Chess(fens[i]));
+            const afterMat = materialScore(new Chess(g0.fen()));
+            const side = moverSide === 'w' ? { before: beforeMat.w, after: afterMat.w } : { before: beforeMat.b, after: afterMat.b };
+            if (side.after >= side.before && cpLoss <= 30) {
+              moveAccuracy = Math.max(moveAccuracy, 95);
+            }
+          }
+        } catch {}
+      }
+
+      // Clamp
+      moveAccuracy = Math.max(0, Math.min(100, moveAccuracy));
       stats[player].accuracy += moveAccuracy;
 
-      // Count "good" moves (threshold ~92%) to compute a small consistency bonus later
+      // Count buckets for rating penalties (mate-distance aware)
+      const bestMateForMover2 = ("mate" in best && Math.sign(best.mate) > 0) ? Math.abs(best.mate) : null;
+      const playedMateForMover2 = ("mate" in after && (after.mate === 0 || Math.sign(after.mate) < 0)) ? Math.abs(after.mate) : null;
+      const dMate = (bestMateForMover2 != null && playedMateForMover2 != null) ? (playedMateForMover2 - bestMateForMover2) : null;
+
+      if (dMate != null && dMate >= 0) {
+        // Slower mate still winning: never count as blunder; map softly by distance
+        if (dMate === 0) stats[player].counts.best++;
+        else if (dMate === 1) stats[player].counts.excellent++;
+        else if (dMate <= 3) stats[player].counts.good++;
+        else if (dMate <= 6) stats[player].counts.inaccuracy++;
+        else stats[player].counts.mistake++;
+      } else {
+        if (cpLoss <= 10) stats[player].counts.best++;
+        else if (cpLoss <= 20) stats[player].counts.excellent++;
+        else if (cpLoss <= 50) { stats[player].counts.good++; }
+        else if (cpLoss <= 150) stats[player].counts.inaccuracy++;
+        else if (cpLoss <= 300) stats[player].counts.mistake++;
+        else stats[player].counts.blunder++;
+      }
+
+      // Miss (taktik terlewat), konsisten dengan classifyMoveByDelta
+      const isMiss = (
+        (("mate" in best && Math.sign(best.mate) > 0) || (bestCp != null && bestCp >= 300)) &&
+        (playedCp != null && playedCp <= 50)
+      );
+      if (isMiss) stats[player].counts.miss++;
+
+      // Extra penalty trigger: move allows opponent mate-in-1 immediately
+      if ("mate" in after && Number(after.mate) === 1) {
+        stats[player].extraPenalty += 200;
+      }
+
+      // Track good move ratio for consistency bonus separately (>=92%)
       if (moveAccuracy >= 92) stats[player].goodMoves++;
     }
 
@@ -846,22 +1027,10 @@ export default function App() {
         stats[color].accuracy = stats[color].accuracy / stats[color].totalMoves;
         const goodMoveRatio = stats[color].goodMoves / stats[color].totalMoves;
 
-        // Game rating: anchor near 800 and scale primarily with accuracy.
-        // Calibrated so ~89% ≈ ~1200 and ~73% ≈ ~800 for short games.
-        const slope = 25; // rating points per 1% above the 73% anchor
-        const anchor = 73; // reference accuracy
-        const baseMin = 800; // minimum cap
-        const gain = Math.max(0, (stats[color].accuracy - anchor) * slope);
-
-        // Small consistency bonus (0..100) when many moves are high-accuracy
-        const consistencyBonus = Math.max(0, (goodMoveRatio - 0.5) * 200); // 0 if <=50% good moves
-
-        let rating = baseMin + gain + consistencyBonus;
-        rating = Math.max(800, Math.min(2200, rating));
-        stats[color].gameRating = Math.round(rating);
+        // Game rating removed
       }
     });
-                                                    
+
     return stats;
   }, [fens, evals]);
 
@@ -1044,9 +1213,9 @@ export default function App() {
       case 'excellent':
         return 'rgba(30, 255, 0, 0.45)'; // dark green
       case 'brilliant':
-        return 'rgba(34, 211, 238, 0.45)'; // cyan
+        return 'rgb(0, 221, 255)'; // cyan
       case 'great':
-        return 'rgb(0, 162, 255)'; // blue
+        return 'rgba(42, 175, 252, 0.6)'; // blue
       default:
         return 'rgba(255, 255, 0, 0.35)';
     }
@@ -1147,12 +1316,10 @@ export default function App() {
           <div className="board-container">
             <div className="board-wrapper">
               <div className="board-with-eval">
-                {!thinking && (
-                  <EvaluationBar 
-                    evaluation={effectiveEval}
-                    sideToMove={effectiveSide}
-                  />
-                )}
+                <EvaluationBar 
+                  evaluation={effectiveEval}
+                  sideToMove={effectiveSide}
+                />
                 <div style={{ width: '500px', height: '500px', position: 'relative', marginLeft: 0 }}>
                   <Chessboard
                     id="analysis-board"
@@ -1179,54 +1346,8 @@ export default function App() {
                 </div>
               </div>
               
-              {/* Navigation Controls */}
-              <div className="nav-controls">
-                <button
-                  className="nav-btn"
-                  onClick={() => navigateToPosition(0)}
-                  disabled={!hasGame}
-                >
-                  ⏮
-                </button>
-                <button
-                  className="nav-btn"
-                  onClick={() => navigateToPosition(Math.max(0, idx - 1))}
-                  disabled={!hasGame}
-                >
-                  ◀
-                </button>
-                <div className="nav-slider">
-                  <input
-                    type="range"
-                    min={0}
-                    max={Math.max(0, fens.length - 1)}
-                    value={idx}
-                    onChange={(e) => navigateToPosition(parseInt(e.target.value, 10))}
-                    disabled={!hasGame}
-                  />
-                </div>
-                <button
-                  className="nav-btn"
-                  onClick={() => navigateToPosition(Math.min(fens.length - 1, idx + 1))}
-                  disabled={!hasGame}
-                >
-                  ▶
-                </button>
-                <button
-                  className="nav-btn"
-                  onClick={() => navigateToPosition(fens.length - 1)}
-                  disabled={!hasGame}
-                >
-                  ⏭
-                </button>
-              </div>
+              {/* Navigation Controls moved to right panel bottom */}
 
-              {/* Status message when no game loaded */}
-              {!hasGame && (
-                <div className="status-message">
-                  Paste PGN content above and click Analyze to start
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -1266,33 +1387,17 @@ export default function App() {
             </div>
 
             {/* Player Stats */}
-            <div>
-              {/* White Player Stats */}
-              <div className="card stats-card" style={{ marginBottom: '16px' }}>
-                <div className="stats-grid">
-                  <div className="stat-item">
-                    <div className="stat-label">Accuracy</div>
-                    <div className="stat-value accuracy">{playerStats.white.accuracy.toFixed(2)}%</div>
-                  </div>
-                  <div className="stat-item">
-                    <div className="stat-label">Game Rating</div>
-                    <div className="stat-value rating">{playerStats.white.gameRating}</div>
-                  </div>
-                </div>
+            <div className="accuracy-wrapper">
+              {/* White Player Stats (left side) */}
+              <div className="stat-item stats-white">
+                <div className="stat-label">Accuracy</div>
+                <div className="stat-value accuracy">{playerStats.white.accuracy.toFixed(2)}%</div>
               </div>
 
-              {/* Black Player Stats */}
-              <div className="card stats-card">
-                <div className="stats-grid">
-                  <div className="stat-item">
-                    <div className="stat-label">Accuracy</div>
-                    <div className="stat-value accuracy">{playerStats.black.accuracy.toFixed(2)}%</div>
-                  </div>
-                  <div className="stat-item">
-                    <div className="stat-label">Game Rating</div>
-                    <div className="stat-value rating">{playerStats.black.gameRating}</div>
-                  </div>
-                </div>
+              {/* Black Player Stats (right side) */}
+              <div className="stat-item stats-black">
+                <div className="stat-label">Accuracy</div>
+                <div className="stat-value accuracy">{playerStats.black.accuracy.toFixed(2)}%</div>
               </div>
             </div>
 
@@ -1324,7 +1429,22 @@ export default function App() {
                 <h3 className="card-title">Evaluation</h3>
                 <div className="chart-container">
                   <ResponsiveContainer>
-                    <LineChart data={chartData}>
+                    <ComposedChart 
+                      data={chartData} 
+                      margin={{ top: 0, right: 0, bottom: -6, left: -8 }}
+                      onClick={(state) => {
+                        const label = state && typeof state.activeLabel === 'number' ? state.activeLabel : null;
+                        if (label == null) return;
+                        const clamped = Math.max(0, Math.min(fens.length - 1, Math.round(label)));
+                        setIdx(clamped);
+                      }}
+                      onMouseUp={(state) => {
+                        const label = state && typeof state.activeLabel === 'number' ? state.activeLabel : null;
+                        if (label == null) return;
+                        const clamped = Math.max(0, Math.min(fens.length - 1, Math.round(label)));
+                        setIdx(clamped);
+                      }}
+                    >
                       <defs>
                         <linearGradient id="whiteArea" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="50%" stopColor="rgba(255,255,255,0.1)" />
@@ -1335,19 +1455,24 @@ export default function App() {
                           <stop offset="50%" stopColor="rgba(0,0,0,0.1)" />
                         </linearGradient>
                       </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#4B5563" />
+                      <CartesianGrid 
+                        vertical={false}
+                        horizontal={false}
+                        stroke="transparent"
+                        fill="#1a1a1ab7" 
+                        fillOpacity={1} 
+                      />
                       <XAxis 
+                        type="number"
                         dataKey="move" 
-                        stroke="#9CA3AF"
-                        tick={{ fontSize: 10 }}
-                        axisLine={{ stroke: '#6B7280' }}
+                        domain={[chartData && chartData.length ? chartData[0].move : 0, chartData && chartData.length ? chartData[chartData.length - 1].move : 0]}
+                        allowDataOverflow
+                        hide
                       />
                       <YAxis 
-                        domain={[-3, 3]} 
-                        stroke="#9CA3AF"
-                        tick={{ fontSize: 10 }}
-                        axisLine={{ stroke: '#6B7280' }}
-                        tickFormatter={(value) => value > 0 ? `+${value}` : value}
+                        domain={[-10, 10]} 
+                        allowDataOverflow
+                        hide
                       />
                       <Tooltip 
                         contentStyle={{ 
@@ -1362,25 +1487,39 @@ export default function App() {
                         ]}
                         labelFormatter={(move) => `Move ${move}`}
                       />
-                      {/* Reference line at y=0 */}
+                      {/* Axis lines flush to edges */}
+                      <ReferenceLine x="dataMin" stroke="#EAB308" strokeWidth={3} />
+                      <ReferenceLine y="dataMin" stroke="#E5E7EB" strokeWidth={1} />
+                      {/* Reference line at y=0 (subtle) */}
                       <Line 
                         type="monotone" 
                         dataKey={() => 0}
                         stroke="#6B7280"
                         strokeWidth={1}
-                        strokeDasharray="2 2"
+                        strokeDasharray="4 4"
+                        strokeOpacity={0.3}
                         dot={false}
                         activeDot={false}
+                      />
+                      {/* White area fill over black background */}
+                      <Area 
+                        type="monotone"
+                        dataKey="pawns"
+                        fill="#ffffff"
+                        stroke="none"
+                        baseValue={-10}
+                        fillOpacity={1}
+                        isAnimationActive={false}
                       />
                       <Line 
                         type="monotone" 
                         dataKey="pawns" 
                         stroke="#3B82F6" 
                         strokeWidth={2}
-                        dot={{ fill: '#3B82F6', strokeWidth: 0, r: 2 }}
-                        activeDot={{ r: 4, stroke: '#3B82F6', strokeWidth: 2 }}
+                        dot={false}
+                        activeDot={false}
                       />
-                    </LineChart>
+                    </ComposedChart>
                   </ResponsiveContainer>
                 </div>
               </div>
@@ -1421,6 +1560,40 @@ export default function App() {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Fixed bottom navigation inside right panel */}
+          <div className="right-panel-nav">
+            <div className="nav-controls">
+              <button
+                className="nav-btn"
+                onClick={() => navigateToPosition(0)}
+                disabled={!hasGame}
+              >
+                ⏮
+              </button>
+              <button
+                className="nav-btn"
+                onClick={() => navigateToPosition(Math.max(0, idx - 1))}
+                disabled={!hasGame}
+              >
+                ◀
+              </button>
+              <button
+                className="nav-btn"
+                onClick={() => navigateToPosition(Math.min(fens.length - 1, idx + 1))}
+                disabled={!hasGame}
+              >
+                ▶
+              </button>
+              <button
+                className="nav-btn"
+                onClick={() => navigateToPosition(fens.length - 1)}
+                disabled={!hasGame}
+              >
+                ⏭
+              </button>
+            </div>
           </div>
         </div>
       </div>
