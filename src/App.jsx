@@ -1,4 +1,11 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  memo,
+} from "react";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { motion, AnimatePresence } from "framer-motion";
@@ -16,7 +23,7 @@ import {
 } from "recharts";
 
 // --- Evaluation Bar Component ---
-function EvaluationBar({ evaluation, sideToMove }) {
+function EvaluationBar({ evaluation, sideToMove, barHeight = 500, barWidth = 30 }) {
   // Logistic mapping from pawns (White perspective) → percentage
   // This approximates chess.com style saturation: ~1 pawn ≈ 65%, 2 pawns ≈ 78%, 3 pawns ≈ 87%
   const pawnsToPct = (pawns) => {
@@ -53,32 +60,24 @@ function EvaluationBar({ evaluation, sideToMove }) {
     return 0;
   };
 
-  // Numeric label text (White perspective)
-  const getWhiteAdvText = () => {
-    if (!evaluation) return '0.0';
-    const pv1Mate = (() => {
-      try {
-        const pv1 = Array.isArray(evaluation.multipv) ? evaluation.multipv.find(x => x.rank === 1) : null;
-        if (pv1 && ('mate' in pv1)) return Number(pv1.mate);
-      } catch {}
-      return null;
-    })();
-    const mRaw = ('mate' in evaluation) ? Number(evaluation.mate) : pv1Mate;
-    if (mRaw != null) {
-      if (mRaw === 0) return 'Checkmate';
-      const mWhite = sideToMove === 'w' ? mRaw : -mRaw;
-      return (mWhite >= 0 ? '' : '-') + 'M' + Math.abs(mWhite);
+  // Numeric label text displayed inside the bar (bottom)
+  const labelText = (() => {
+    if (!evaluation) return '';
+    if ('mate' in evaluation) {
+      const m = Number(evaluation.mate);
+      if (m === 0) {
+        // Side-to-move is checkmated; winner is the opposite side
+        return sideToMove === 'w' ? '0-1' : '1-0';
+      }
+      const sign = Math.sign(m);
+      return sign > 0 ? `M${Math.abs(m)}` : `M-${Math.abs(m)}`;
     }
     if ('cp' in evaluation) {
-      const cpWhite = sideToMove === 'b' ? -evaluation.cp : evaluation.cp;
-      const pawns = cpWhite / 100;
-      const abs = Math.abs(pawns);
-      // Chess.com caps display around 10.0 pawns
-      const txt = abs < 9.95 ? pawns.toFixed(1) : (pawns > 0 ? '10+' : '-10+');
-      return txt.startsWith('-') || txt.startsWith('1') || txt.startsWith('0') ? txt : `+${txt}`;
+      const pawns = (evaluation.cp / 100).toFixed(1);
+      return `${pawns}`;
     }
-    return '0.0';
-  };
+    return '';
+  })();
 
   const pawnsWhite = evalToWhitePawns();
   const percentage = (() => {
@@ -97,64 +96,152 @@ function EvaluationBar({ evaluation, sideToMove }) {
 
   const whiteHeight = percentage;
   const blackHeight = 100 - percentage;
-  const labelText = getWhiteAdvText();
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-      <div style={{
-        position: 'relative',
-        width: '30px',
-        height: '500px',
-        border: '1px solid #333',
-        borderRadius: '4px',
-        overflow: 'hidden',
-        display: 'flex',
-        flexDirection: 'column',
-      }}>
-        {/* Center marker at 50% */}
-        <div style={{
-          position: 'absolute',
-          top: '50%',
-          left: 0,
-          width: '100%',
-          height: '2px',
-          backgroundColor: 'rgba(255,255,255,0.25)',
-          transform: 'translateY(-1px)',
-          pointerEvents: 'none'
-        }} />
-
-        {/* Black advantage (top) */}
-        <div style={{
-          height: `${blackHeight}%`,
-          backgroundColor: '#2c2c2c',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          transition: 'height 0.35s ease-in-out'
-        }} />
-        
-        {/* White advantage (bottom) */}
-        <div style={{
-          height: `${whiteHeight}%`,
-          backgroundColor: '#f0f0f0',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          transition: 'height 0.35s ease-in-out'
-        }} />
-      </div>
-      {/* Numeric label for White advantage */}
-      <div style={{
-        marginTop: '4px',
-        fontSize: '12px',
-        fontWeight: 600,
-        fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, sans-serif',
-        color: '#fff'
-      }}>
+    <div style={{ position: 'relative', width: barWidth, height: barHeight, borderRadius: 6, overflow: 'hidden', background: '#111827', boxShadow: 'inset 0 0 0 1px rgba(255,255,255,0.06)', flex: `0 0 ${barWidth}px` }}>
+      <div style={{ position: 'absolute', left: 0, top: blackHeight + '%', width: '100%', height: whiteHeight + '%', background: '#ffffff' }} />
+      {/* Label di dalam bar bagian bawah */}
+      <div style={{ position: 'absolute', left: 0, bottom: 6, width: '100%', textAlign: 'center', fontSize: 12, fontWeight: 700, color: '#111827' }}>
         {labelText}
       </div>
     </div>
   );
+}
+
+// --- Captured pieces row component ---
+function CapturedRow({ caps, color = 'white' }) {
+  // caps: { p,n,b,r,q } = jumlah bidak lawan yang berhasil ditangkap oleh 'color lawan'
+  // Tapi yang kita tampilkan di bawah nama pemain adalah "bidak yang HILANG" dari pemain tsb,
+  // jadi ikon yang ditampilkan mengikuti warna pemain itu: 'w' atau 'b'.
+  const prefix = color === 'white' ? 'w' : 'b';
+  const order = ['q','r','b','n','p'];
+  const c = caps || { p:0,n:0,b:0,r:0,q:0 };
+  const size = 16; // ukuran ikon kecil 16px
+  const items = [];
+  order.forEach(t => {
+    const count = c[t] || 0;
+    for (let i=0; i<count; i++) {
+      const code = `${prefix}${t.toUpperCase()}`; // contoh: wQ, bN
+      const src = `/pieces/${code}.svg`;
+      items.push({ src, code, i });
+    }
+  });
+  if (items.length === 0) return <div style={{ minHeight: size }} />;
+  return (
+    <div style={{ display: 'flex', gap: 4, alignItems: 'center', minHeight: size }}>
+      {items.map((it, idx) => (
+        <img
+          key={`${it.code}-${idx}`}
+          src={it.src}
+          alt={it.code}
+          width={size}
+          height={size}
+          style={{ display: 'block', filter: 'drop-shadow(0 1px 1px rgba(0,0,0,0.35))' }}
+          loading="lazy"
+        />
+      ))}
+    </div>
+  );
+}
+
+// --- Minimal Error Boundary ---
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() { return { hasError: true }; }
+  componentDidCatch(error, info) { console.error('ErrorBoundary caught:', error, info); }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 16, background: '#7f1d1d', border: '1px solid #b91c1c', borderRadius: 8, color: '#fecaca' }}>
+          Terjadi kesalahan saat merender komponen. Silakan coba lagi.
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// --- Util: deteksi exchange sacrifice (mis. Rxd5: rook (5) menangkap minor (3) → korbankan nilai ≥2)
+function isExchangeSacrifice(fen, san) {
+  try {
+    const values = { p:1, n:3, b:3, r:5, q:9, k:0 };
+    const g = new Chess(fen);
+    const before = materialScore(g);
+    const m = g.move(san, { sloppy: true });
+    if (!m) return false;
+    // Hanya relevan jika ini capture
+    if (!m.flags || !m.flags.includes('c')) return false;
+    const movedType = m.piece; // 'r','n','b','q','k','p'
+    const capturedType = m.captured; // 'p','n','b','r','q'
+    if (!movedType || !capturedType) return false;
+    const delta = (values[movedType] || 0) - (values[capturedType] || 0);
+    // Exchange sacrifice jika nilai buah yang bergerak lebih besar ≥2 dibanding yang ditangkap
+    return delta >= 2;
+  } catch {
+    return false;
+  }
+}
+
+// --- Util: compute worst immediate capture loss for mover after playing SAN (any capture, any square)
+function worstImmediateCaptureLoss(fen, san, moverSide) {
+  try {
+    const before = new Chess(fen);
+    const m = before.move(san, { sloppy: true });
+    if (!m) return null;
+    const after = before; // position after mover's move
+    const scoAfter = materialScore(after);
+    const opponentMoves = after.moves({ verbose: true });
+    let worst = 0; // most negative
+    let found = false;
+    for (const om of opponentMoves) {
+      if (!om.flags.includes('c')) continue;
+      const test = new Chess(after.fen());
+      test.move({ from: om.from, to: om.to, promotion: om.promotion });
+      const scoCap = materialScore(test);
+      const delta = (moverSide === 'w') ? (scoCap.w - scoAfter.w) : (scoCap.b - scoAfter.b);
+      if (!found || delta < worst) { worst = delta; found = true; }
+    }
+    return found ? worst : null;
+  } catch {
+    return null;
+  }
+}
+
+// --- Util: normalize SAN for comparison (strip trailing +, #, !, ? characters) ---
+function normalizeSan(san) {
+  if (!san) return san;
+  return String(san).replace(/[+#!?]+$/g, '').trim();
+}
+
+// --- Util: magnitude of offered sacrifice (pawns) if opponent captures the offered piece immediately.
+// Returns a negative number for material loss by the mover (e.g., -9 for queen), or null if no such capture.
+function offeredSacrificeLossMagnitude(fen, san, moverSide) {
+  try {
+    const before = new Chess(fen);
+    const wasInCheck = before.in_check();
+    const move = before.move(san, { sloppy: true });
+    if (!move) return null;
+    const after = before; // after mover's move
+    const scoAfter = materialScore(after);
+    const opponentMoves = after.moves({ verbose: true });
+    const targetSquare = move.to;
+    for (const om of opponentMoves) {
+      if (om.to === targetSquare && om.flags.includes('c')) {
+        const test = new Chess(after.fen());
+        test.move({ from: om.from, to: om.to, promotion: om.promotion });
+        const scoCap = materialScore(test);
+        const delta = (moverSide === 'w') ? (scoCap.w - scoAfter.w) : (scoCap.b - scoAfter.b);
+        // delta is negative when mover loses material. Return that value.
+        return delta; // e.g., -9 for a queen offer
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 // --- Worker: memuat Stockfish dari CDN di dalam Web Worker ---
@@ -166,29 +253,144 @@ function createStockfishWorker(url = '/stockfish/stockfish-17.1-8e4d048.js') {
 
 // --- Util: parse PGN jadi daftar FEN + SAN ---
 function parsePgnToFens(pgn) {
+  const raw = (pgn ?? '').toString();
+  // Normalisasi line-ending agar Chess.js tidak bingung dengan CRLF Windows
+  let normalized = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  if (!normalized.endsWith('\n')) normalized += '\n';
   const game = new Chess();
-  
   try {
-    game.loadPgn(pgn, { sloppy: true, newlineChar: "\n" });
-    
-    // Check if any moves were actually loaded
+    const opts = { sloppy: true, newlineChar: '\n' };
+    const loader = (g, s) => (typeof g.loadPgn === 'function' ? g.loadPgn(s, opts) : (typeof g.load_pgn === 'function' ? g.load_pgn(s, opts) : false));
+    let ok = loader(game, normalized);
+    if (!ok) {
+      // Fallback: buang header [Tags] dan ambil movetext mulai dari nomor langkah pertama
+      // Pastikan ada blank line antara header dan movetext
+      const lines = normalized.split('\n');
+      let lastTagIdx = -1;
+      for (let i = 0; i < lines.length; i++) {
+        if (/^\s*\[.*\]\s*$/.test(lines[i])) lastTagIdx = i; else break;
+      }
+      if (lastTagIdx >= 0) {
+        const hasBlank = lines[lastTagIdx + 1] === '';
+        if (!hasBlank) {
+          lines.splice(lastTagIdx + 1, 0, '');
+        }
+      }
+      const normalizedWithBlank = lines.join('\n');
+      ok = loader(game, normalizedWithBlank);
+      if (!ok) {
+        const noTags = normalizedWithBlank
+        .split('\n')
+        .filter(line => !/^\s*\[.*\]\s*$/.test(line))
+        .join(' ');
+        const idxFirstMove = noTags.search(/\d+\s*\./);
+        if (idxFirstMove >= 0) {
+          let movetext = noTags.slice(idxFirstMove).trim();
+          // normalisasi spasi
+          movetext = movetext.replace(/\s+/g, ' ').trim();
+          if (!movetext.endsWith('\n')) movetext += '\n';
+          ok = loader(game, movetext);
+        }
+      }
+    }
+    if (!ok) throw new Error('format PGN tidak dikenali');
+
     const moves = game.history({ verbose: true });
-    if (moves.length === 0) {
-      throw new Error("PGN tidak mengandung langkah yang valid");
+    if (!Array.isArray(moves) || moves.length === 0) {
+      throw new Error('PGN tidak mengandung langkah yang valid');
     }
 
     const walk = new Chess();
-    const fens = [walk.fen()]; // posisi awal
+    const fens = [walk.fen()];
     const sans = [];
-
+    // Build captures progress: index i corresponds to position after i moves (same as fens[i])
+    const emptyCaps = () => ({ p:0, n:0, b:0, r:0, q:0 });
+    const capsProgress = [{ white: emptyCaps(), black: emptyCaps() }];
+    let accWhite = emptyCaps();
+    let accBlack = emptyCaps();
     for (const mv of moves) {
       walk.move(mv);
-      fens.push(walk.fen());   // posisi setelah langkah ini
+      fens.push(walk.fen());
       sans.push(mv.san);
+      // track captured
+      if (mv.captured) {
+        // mover color mv.color captures opponent piece mv.captured
+        const t = mv.captured; // 'p','n','b','r','q'
+        if (mv.color === 'w') accWhite = { ...accWhite, [t]: (accWhite[t] || 0) + 1 };
+        else accBlack = { ...accBlack, [t]: (accBlack[t] || 0) + 1 };
+      }
+      capsProgress.push({ white: { ...accWhite }, black: { ...accBlack } });
     }
-    return { fens, sans };
+    // Extract headers (fallback to regex over tags)
+    const tags = {};
+    normalized.split('\n').forEach((line) => {
+      const m = line.match(/^\s*\[(\w+)\s+"(.*)"\]\s*$/);
+      if (m) tags[m[1]] = m[2];
+    });
+    const headers = {
+      White: tags.White || 'White Player',
+      Black: tags.Black || 'Black Player',
+      WhiteElo: tags.WhiteElo || tags.WhiteELO || '',
+      BlackElo: tags.BlackElo || tags.BlackELO || ''
+    };
+    return { fens, sans, game, headers, captures: capsProgress };
   } catch (e) {
-    throw new Error("PGN tidak valid atau gagal di-parse: " + e.message);
+    // Fallback terakhir: parse SAN manual dari movetext sederhana
+    try {
+      const stripTags = (s) => s.replace(/^\s*\[.*\]\s*$\n?/gm, '');
+      const stripComments = (s) => s
+        .replace(/\{[^}]*\}/g, ' ')    // {comments}
+        .replace(/;.*$/gm, ' ')         // ; comments per-line
+        .replace(/\$\d+/g, ' ');       // NAGs
+      const stripResults = (s) => s.replace(/\b(1-0|0-1|1\/2-1\/2|\*)\b/g, ' ');
+      const stripMoveNums = (s) => s.replace(/\d+\s*\.\.\.|\d+\s*\./g, ' ');
+      let text = stripTags(normalized);
+      text = stripComments(text);
+      text = stripResults(text);
+      text = stripMoveNums(text);
+      text = text.replace(/\s+/g, ' ').trim();
+      if (!text) throw e;
+
+      const walk = new Chess();
+      const fens = [walk.fen()];
+      const sans = [];
+      const tokens = text.split(' ');
+      for (const tok of tokens) {
+        const mv = walk.move(tok, { sloppy: true });
+        if (!mv) {
+          // jika token bukan SAN, abaikan (mis. spasi ganda)
+          continue;
+        }
+        sans.push(mv.san);
+        fens.push(walk.fen());
+      }
+      if (sans.length === 0) throw e;
+      // rebuild captures for fallback tokens
+      const emptyCaps = () => ({ p:0, n:0, b:0, r:0, q:0 });
+      const capsProgress = [{ white: emptyCaps(), black: emptyCaps() }];
+      let accWhite = emptyCaps();
+      let accBlack = emptyCaps();
+      const hist = walk.history({ verbose: true });
+      for (const mv of hist) {
+        if (mv.captured) {
+          const t = mv.captured;
+          if (mv.color === 'w') accWhite = { ...accWhite, [t]: (accWhite[t] || 0) + 1 }; else accBlack = { ...accBlack, [t]: (accBlack[t] || 0) + 1 };
+        }
+        capsProgress.push({ white: { ...accWhite }, black: { ...accBlack } });
+      }
+      // headers via tags stripped earlier
+      const tags = {};
+      raw.replace(/\r\n/g,'\n').split('\n').forEach((line)=>{ const m=line.match(/^\s*\[(\w+)\s+"(.*)"\]\s*$/); if(m) tags[m[1]]=m[2]; });
+      const headers = {
+        White: tags.White || 'White Player',
+        Black: tags.Black || 'Black Player',
+        WhiteElo: tags.WhiteElo || tags.WhiteELO || '',
+        BlackElo: tags.BlackElo || tags.BlackELO || ''
+      };
+      return { fens, sans, game: walk, headers, captures: capsProgress };
+    } catch (e2) {
+      throw new Error('PGN tidak valid atau gagal di-parse: ' + (e?.message || e));
+    }
   }
 }
 
@@ -320,10 +522,6 @@ function classifyMoveByDelta(bestCp, playedCp, flags) {
   // loss = best - played (>=0 means worse than best)
   const loss = (bestCp ?? 0) - (playedCp ?? 0);
 
-  // Miss (taktik terlewat)
-  if (flags?.bestIsMate || (bestCp != null && bestCp >= 300)) {
-    if (playedCp != null && playedCp <= 50) return "Miss";
-  }
 
   // If both best and played still mate for mover, classify by mate-distance delta instead of raw cp
   if (typeof flags?.deltaMateForMover === 'number') {
@@ -350,6 +548,11 @@ function classifyMoveByDelta(bestCp, playedCp, flags) {
     return "Blunder";
   }
 
+  // Miss (taktik terlewat) – dievaluasi setelah blunder agar tidak menimpa blunder besar
+  if (flags?.bestIsMate || (bestCp != null && bestCp >= 300)) {
+    if (playedCp != null && playedCp <= 50 && loss <= 200) return "Miss"; // jangan label Miss kalau kerugiannya sudah besar → biar jatuh ke Mistake/Blunder
+  }
+
   if (loss <= 10) return "Best";        // sama PV#1 atau selisih ≤10cp
   if (loss <= 20) return "Excellent";
   if (loss <= 50) return "Good";
@@ -363,6 +566,7 @@ function classifyMoveByDelta(bestCp, playedCp, flags) {
 
 export default function App() {
   const [pgn, setPgn] = useState("");
+  const [game, setGame] = useState(null);
   const [error, setError] = useState("");
   const [fens, setFens] = useState([]);     // posisi[0..N]
   const [sans, setSans] = useState([]);     // SAN per ply [1..N]
@@ -373,12 +577,40 @@ export default function App() {
   const [boardKey, setBoardKey] = useState(0); // untuk force re-render
   const [pendingAnalyze, setPendingAnalyze] = useState(null); // { type: 'current'|'all', depth: number } | null
   const [playerNames, setPlayerNames] = useState({ white: 'White Player', black: 'Black Player' });
+  const [playerElos, setPlayerElos] = useState({ white: '', black: '' });
+  const [capturesProgress, setCapturesProgress] = useState([]); // array of { white: {p,n,b,r,q}, black: {...} }
   const [engineReady, setEngineReady] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState(0);
 
   // Worker Stockfish (opsional)
   const workerRef = useRef(null);
+  // Simple in-memory cache: key by fen + options signature
+  const evalCacheRef = useRef(new Map());
+
+  // Responsive board size based on viewport; updates on resize
+  const [boardSize, setBoardSize] = useState(500);
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const compute = () => {
+      const w = window.innerWidth || 1024;
+      // On small screens, make board nearly full width minus paddings
+      if (w <= 900) {
+        const padding = 24 * 2; // left-section padding
+        const size = Math.max(260, Math.min( Math.floor(w - padding - 16), 520));
+        setBoardSize(size);
+        setIsMobile(true);
+      } else {
+        setBoardSize(500);
+        setIsMobile(false);
+      }
+    };
+    compute();
+    window.addEventListener('resize', compute);
+    return () => window.removeEventListener('resize', compute);
+  }, []);
+
+  
 
   useEffect(() => {
     let loadingTimeout;
@@ -584,10 +816,37 @@ export default function App() {
   }
 
   // Analisis 1 posisi (kembalikan evalObj {cp|mate} + multipv)
-  const analyzeFenOnce = useCallback((fen, depth = 12, multiPV = 5) => {
+  const analyzeFenOnce = useCallback((fen, optionsDepthOrOpts = 12, multiPVArg = 5) => {
     return new Promise((resolve) => {
       const w = workerRef.current;
       if (!w) return resolve(null);
+      // Determine options
+      let depth = 12;
+      let multiPV = 5;
+      let movetime = null;
+      if (typeof optionsDepthOrOpts === 'object' && optionsDepthOrOpts !== null) {
+        depth = optionsDepthOrOpts.depth ?? depth;
+        movetime = optionsDepthOrOpts.movetime ?? null;
+        multiPV = optionsDepthOrOpts.multiPV ?? multiPVArg ?? 5;
+      } else {
+        depth = optionsDepthOrOpts ?? 12;
+        multiPV = multiPVArg ?? 5;
+      }
+
+      // Terminal position short-circuit
+      const terminal = getTerminalEval(fen);
+      if (terminal) {
+        const key = `${fen}|mv:${movetime ?? ''}|dp:${depth}|mpv:${multiPV}`;
+        const res = { ...terminal, bestmoveUci: null, multipv: [] };
+        evalCacheRef.current.set(key, res);
+        return resolve(res);
+      }
+
+      // Cache check
+      const cacheKey = `${fen}|mv:${movetime ?? ''}|dp:${depth}|mpv:${multiPV}`;
+      if (evalCacheRef.current.has(cacheKey)) {
+        return resolve(evalCacheRef.current.get(cacheKey));
+      }
 
       let currentEval = null;
       let bestmoveUci = null;
@@ -666,33 +925,131 @@ export default function App() {
         }
       };
       w.addEventListener('message', handler);
-      // Send UCI commands directly
-      w.postMessage('ucinewgame');
-      w.postMessage('setoption name Threads value 1');
-      w.postMessage('setoption name Hash value 16');
-      w.postMessage('setoption name MultiPV value ' + multiPV);
-      w.postMessage('position fen ' + fen);
-      w.postMessage('go depth ' + depth);
+      // Send UCI commands directly (avoid ucinewgame here to keep hash warm)
+      try { w.postMessage('setoption name MultiPV value ' + multiPV); } catch {}
+      try { w.postMessage('position fen ' + fen); } catch {}
+      if (movetime != null) {
+        try { w.postMessage('go movetime ' + movetime); } catch {}
+      } else {
+        try { w.postMessage('go depth ' + depth); } catch {}
+      }
     });
   }, []);
 
   // Analisis semua posisi berurutan
-  const analyzeAll = useCallback(async (depth = 12, list) => {
+  const analyzeAll = useCallback(async (depth = 12, list, { fastFirstPass = true, movetime = 80, multiPV = 3, stableFinalPass = true, stableDepth = 14, stableMultiPV = 5 } = {}) => {
     const fenList = Array.isArray(list) ? list : fens;
     if (!engineReady || fenList.length === 0) return;
     setThinking(true);
     setAnalyzeProgress(0);
     const next = {};
+    const w = workerRef.current;
+    if (!w) {
+      setThinking(false);
+      return;
+    }
+    // Prepare engine once per batch with deterministic options
+    try {
+      w.postMessage('ucinewgame');
+      w.postMessage('setoption name Clear Hash value true');
+      w.postMessage('setoption name Threads value 1');
+      w.postMessage('setoption name Hash value 32');
+      w.postMessage('setoption name Ponder value false');
+      w.postMessage('setoption name UCI_AnalyseMode value true');
+      w.postMessage('setoption name UCI_LimitStrength value false');
+      w.postMessage('setoption name Skill Level value 20');
+      w.postMessage('setoption name Contempt value 0');
+      w.postMessage('setoption name MultiPV value ' + (fastFirstPass ? multiPV : stableMultiPV));
+    } catch {}
     for (let i = 0; i < fenList.length; i++) {
-      const ev = await analyzeFenOnce(fenList[i], depth);
+      // Use cache-aware fast first pass
+      const opts = fastFirstPass ? { movetime, multiPV, depth: Math.min(depth, 12) } : { depth, multiPV: 5 };
+      const ev = await analyzeFenOnce(fenList[i], opts);
       if (ev) {
         next[i] = ev;
+        // store in cache explicitly as well (already done inside analyzeFenOnce but safe)
+        const key = `${fenList[i]}|mv:${opts.movetime ?? ''}|dp:${opts.depth}|mpv:${opts.multiPV ?? ''}`;
+        evalCacheRef.current.set(key, ev);
       }
       setAnalyzeProgress((i + 1) / fenList.length);
     }
-    setEvals(next);
+    // Stable final pass: re-evaluate SELURUH posisi dengan parameter tetap agar hasil konsisten antar-run
+    let finalEvals = next;
+    if (stableFinalPass) {
+      // Reset engine state for stable pass
+      w.postMessage('ucinewgame');
+      w.postMessage('setoption name Clear Hash value true');
+      w.postMessage('setoption name Threads value 1');
+      w.postMessage('setoption name Hash value 32');
+      w.postMessage('setoption name Ponder value false');
+      w.postMessage('setoption name UCI_AnalyseMode value true');
+      w.postMessage('setoption name UCI_LimitStrength value false');
+      w.postMessage('setoption name Skill Level value 20');
+      w.postMessage('setoption name Contempt value 0');
+      w.postMessage('setoption name MultiPV value ' + stableMultiPV);
+      finalEvals = {};
+      for (let i = 0; i < fenList.length; i++) {
+        const ev2 = await analyzeFenOnce(fenList[i], { depth: stableDepth, multiPV: stableMultiPV });
+        if (ev2) finalEvals[i] = ev2; else finalEvals[i] = next[i] ?? null;
+        setAnalyzeProgress((i + 1) / fenList.length);
+      }
+    }
+    setEvals(finalEvals);
     setThinking(false);
   }, [engineReady, fens, analyzeFenOnce]);
+
+  // Handlers: Quick and Deep analysis (placed AFTER analyzeAll definition)
+  const handleQuickAnalyze = useCallback(() => {
+    try {
+      const parsed = parsePgnToFens(pgn);
+      if (!parsed || !parsed.fens || parsed.fens.length === 0) {
+        setError('PGN tidak valid atau kosong.');
+        return;
+      }
+      setError('');
+      setGame(parsed.game);
+      setFens(parsed.fens);
+      setSans(parsed.sans);
+      // set headers
+      if (parsed.headers) {
+        setPlayerNames({ white: parsed.headers.White || 'White Player', black: parsed.headers.Black || 'Black Player' });
+        setPlayerElos({ white: parsed.headers.WhiteElo || '', black: parsed.headers.BlackElo || '' });
+      }
+      // set captures progress
+      if (parsed.captures) setCapturesProgress(parsed.captures);
+      setIdx(0);
+      setEvals({});
+      analyzeAll(12, parsed.fens, { fastFirstPass: true, stableFinalPass: false, movetime: 80, multiPV: 3 });
+    } catch (e) {
+      console.error('Quick analyze PGN error:', e);
+      setError(e?.message || 'Gagal memproses PGN.');
+    }
+  }, [pgn, analyzeAll]);
+
+  const handleDeepAnalyze = useCallback(() => {
+    try {
+      const parsed = parsePgnToFens(pgn);
+      if (!parsed || !parsed.fens || parsed.fens.length === 0) {
+        setError('PGN tidak valid atau kosong.');
+        return;
+      }
+      setError('');
+      setGame(parsed.game);
+      setFens(parsed.fens);
+      setSans(parsed.sans);
+      if (parsed.headers) {
+        setPlayerNames({ white: parsed.headers.White || 'White Player', black: parsed.headers.Black || 'Black Player' });
+        setPlayerElos({ white: parsed.headers.WhiteElo || '', black: parsed.headers.BlackElo || '' });
+      }
+      if (parsed.captures) setCapturesProgress(parsed.captures);
+      setIdx(0);
+      setEvals({});
+      analyzeAll(14, parsed.fens, { fastFirstPass: false, stableFinalPass: true, stableDepth: 14, stableMultiPV: 5 });
+    } catch (e) {
+      console.error('Deep analyze PGN error:', e);
+      setError(e?.message || 'Gagal memproses PGN.');
+    }
+  }, [pgn, analyzeAll]);
 
   // Wrapper: request deep analysis for current position, queue if engine not ready yet
   const requestAnalyzeCurrent = useCallback((depth = 18) => {
@@ -708,7 +1065,7 @@ export default function App() {
   // Wrapper: request analyze all positions, queue if engine not ready yet
   const requestAnalyzeAll = useCallback((depth = 15) => {
     if (engineReady) {
-      analyzeAll(depth);
+      analyzeAll(depth, undefined, { fastFirstPass: true, movetime: 80, multiPV: 3 });
     } else {
       setPendingAnalyze({ type: 'all', depth });
     }
@@ -719,11 +1076,11 @@ export default function App() {
     if (engineReady && pendingAnalyze) {
       const { type, depth } = pendingAnalyze;
       if (type === 'current') {
-        analyzeFenOnce(fens[idx], depth).then((ev) => {
+        analyzeFenOnce(fens[idx], { depth, multiPV: 5 }).then((ev) => {
           if (ev) setEvals((prev) => ({ ...prev, [idx]: ev }));
         });
       } else if (type === 'all') {
-        analyzeAll(depth);
+        analyzeAll(depth, undefined, { fastFirstPass: true, movetime: 80, multiPV: 3 });
       }
       setPendingAnalyze(null);
     }
@@ -819,18 +1176,30 @@ export default function App() {
       // Great / Brilliant detection: only-move and optional sacrifice
       const pvList = Array.isArray(best.multipv) ? best.multipv : [];
       const bestUci = best.bestmoveUci || pvList.find(x => x.rank === 1)?.uci || null;
-      const bestSan = bestUci ? uciToSan(fens[i], bestUci) : null;
-      const playedSan = sans[i];
+      const bestSanRaw = bestUci ? uciToSan(fens[i], bestUci) : null;
+      const playedSanRaw = sans[i];
+      const bestSan = normalizeSan(bestSanRaw);
+      const playedSan = normalizeSan(playedSanRaw);
 
       // If the played move equals engine best (SAN match), default to 'Best'.
-      // Upgrade to 'Brilliant' only if it is a genuine sacrifice AND either:
-      //  (a) it's an only-move (alternatives lose ≥150cp), or
-      //  (b) PV#1 has a sizable gap vs PV#2 (≥200cp), indicating a tactically unique resource.
+      // Upgrade to 'Brilliant' when it is a genuine offered sacrifice that yields a winning outcome.
       if (bestSan && playedSan && playedSan === bestSan) {
-        let upgradeBrilliant = false;
-        const offered = offersSacrificeNextMove(fens[i], playedSan, moverSide);
-        if (offered) {
-          // compute onlyMove and pv gap using current pvList
+        // Compute sacrifice magnitude in pawn units (negative = loss for mover)
+        let sacLoss = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
+        const winningLine = (typeof bestCp === 'number' && bestCp >= 150) || ("mate" in best && Math.sign(best.mate) > 0);
+        // Also count as winning if the resulting position after the move is clearly winning for the mover
+        const playedWinning = (typeof playedCp === 'number' && playedCp >= 100) || ("mate" in after && (after.mate === 0 || Math.sign(after.mate) < 0));
+        const exchangeSac = isExchangeSacrifice(fens[i], playedSan);
+
+        // Primary Brilliant rule: significant offered sacrifice (≥ 5 pawns, e.g., rook/queen)
+        // and the engine best indicates a winning continuation for the mover
+        if ((typeof sacLoss === 'number' && (
+              sacLoss <= -8 && (playedCp == null || playedCp > -50) // queen-level sac and not clearly losing
+            || ((winningLine || playedWinning) && sacLoss <= -5)
+          )) || (exchangeSac && (winningLine || playedWinning))) {
+          tag = 'Brilliant';
+        } else {
+          // Secondary: large PV gap implies tactical uniqueness
           let pvGap = 0;
           if (pvList.length >= 2) {
             const getCp = (item) => ('mate' in item) ? mateToScore(item.mate) : (item.cp);
@@ -838,9 +1207,10 @@ export default function App() {
             const pv2 = pvList.find(x => x.rank === 2);
             if (pv1 && pv2) pvGap = getCp(pv1) - getCp(pv2);
           }
-          upgradeBrilliant = (pvGap >= 200);
+          // Secondary upgrade: allow exchange-level sac (<= -2) if unik (PV gap besar) atau terdeteksi exchangeSac
+          const significantSacPVGap = (typeof sacLoss === 'number' && sacLoss <= -2) || exchangeSac;
+          tag = (significantSacPVGap && pvGap >= 150) ? 'Brilliant' : 'Best';
         }
-        tag = (offered && (upgradeBrilliant)) ? 'Brilliant' : 'Best';
       }
 
       // Compute only-move: all alternatives lose >=150cp vs best for mover
@@ -861,8 +1231,37 @@ export default function App() {
       }
 
       if (onlyMove && playedSan === bestSan) {
-        const sacImmediate = isSacrificeMove(fens[i], playedSan, moverSide) || offersSacrificeNextMove(fens[i], playedSan, moverSide);
-        tag = sacImmediate ? 'Brilliant' : 'Great';
+        const offeredNow = offersSacrificeNextMove(fens[i], playedSan, moverSide);
+        const sacLossOnly = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
+        const exchangeSac = isExchangeSacrifice(fens[i], playedSan);
+        const significantSac = exchangeSac || (typeof sacLossOnly === 'number' ? (sacLossOnly <= -2) : false); // exchange-level allowed
+        const notClearlyLosing = (playedCp == null || playedCp > -50);
+        if (tag !== 'Brilliant') {
+          tag = ( (offeredNow || significantSac) && notClearlyLosing) ? 'Brilliant' : 'Great';
+        }
+      }
+
+      // Fallback Brilliant (DEFINISI BARU): HANYA berlaku jika langkah yang dimainkan adalah PV#1 (best move).
+      // Tidak akan mempromosikan menjadi Brilliant untuk langkah yang bukan PV#1, meskipun ada sacrifice.
+      if (tag !== 'Brilliant' && bestSan && playedSan && playedSan === bestSan) {
+        try {
+          const sacLoss2 = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
+          const exchangeSac2 = isExchangeSacrifice(fens[i], playedSan);
+          const winningLine2 = (typeof bestCp === 'number' && bestCp >= 150) || ("mate" in best && Math.sign(best.mate) > 0);
+          const playedWinning2 = (typeof playedCp === 'number' && playedCp >= 100) || ("mate" in after && (after.mate === 0 || Math.sign(after.mate) < 0));
+          if ((typeof sacLoss2 === 'number' && (
+                (sacLoss2 <= -8 && (playedWinning2 || (playedCp == null || playedCp > -50)))
+              || ((winningLine2 || playedWinning2) && sacLoss2 <= -2) // allow exchange-level in winning context
+            )) || (exchangeSac2 && (winningLine2 || playedWinning2))) {
+            tag = 'Brilliant';
+          } else if (sacLoss2 == null) {
+            // very strict last resort using global worst capture: only queen-level and clear winning after
+            const worst = worstImmediateCaptureLoss(fens[i], playedSan, moverSide);
+            if (typeof worst === 'number' && worst <= -9 && (playedWinning2 || (playedCp == null || playedCp > -30))) {
+              tag = 'Brilliant';
+            }
+          }
+        } catch {}
       }
 
       if (tag) ann[i + 1] = { mover: moverSide === 'w' ? 'White' : 'Black', tag, delta: (deltaCp / 100) };
@@ -1076,7 +1475,7 @@ export default function App() {
             
             return (
               <line
-                key={index}
+                key={`${from}-${to}-${index}`}
                 x1={fromPos.x}
                 y1={fromPos.y}
                 x2={toPos.x}
@@ -1257,6 +1656,7 @@ export default function App() {
   }
 
   return (
+    <ErrorBoundary>
     <div className="app-container">
       <div className="main-layout">
         {/* Left Side - Board Section */}
@@ -1289,20 +1689,29 @@ export default function App() {
               </button>
             </div>
             
-            <div className="pgn-input-row">
+            <div className="pgn-input-row" style={{ alignItems: 'stretch' }}>
               <textarea
                 className="textarea-pgn"
                 placeholder="Paste your PGN here..."
                 value={pgn}
                 onChange={(e) => setPgn(e.target.value)}
               />
-              <button
-                onClick={handleAnalyze}
-                disabled={!pgn.trim() || thinking}
-                className="btn-analyze"
-              >
-                {thinking ? 'Analyzing...' : 'Analyze'}
-              </button>
+              <div className="pgn-actions">
+                <button
+                  onClick={handleQuickAnalyze}
+                  disabled={!pgn.trim() || thinking}
+                  className="btn-analyze"
+                >
+                  {thinking ? 'Analyzing...' : 'Quick'}
+                </button>
+                <button
+                  onClick={handleDeepAnalyze}
+                  disabled={!pgn.trim() || thinking}
+                  className="btn-analyze"
+                >
+                  {thinking ? 'Analyzing...' : 'Deep'}
+                </button>
+              </div>
             </div>
 
             {error && (
@@ -1311,41 +1720,66 @@ export default function App() {
               </div>
             )}
           </div>
-
+  
           {/* Chess Board Section */}
           <div className="board-container">
             <div className="board-wrapper">
-              <div className="board-with-eval">
-                <EvaluationBar 
-                  evaluation={effectiveEval}
-                  sideToMove={effectiveSide}
-                />
-                <div style={{ width: '500px', height: '500px', position: 'relative', marginLeft: 0 }}>
-                  <Chessboard
-                    id="analysis-board"
-                    position={hasGame ? (fens[idx] || 'start') : 'start'}
-                    boardWidth={500}
-                    arePiecesDraggable={false}
-                    showBoardNotation={true}
-                    animationDuration={300}
-                    customBoardStyle={{ borderRadius: '4px', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
-                    customSquareStyles={lastMove ? {
-                      [lastMove.from]: { backgroundColor: getHighlightColor(annotations[idx]?.tag) },
-                      [lastMove.to]: { backgroundColor: getHighlightColor(annotations[idx]?.tag) }
-                    } : {}}
-                  />
-                  {!thinking && <ArrowOverlay arrows={bestMoveArrow} boardSize={500} />}
-                  {/* Ikon klasifikasi pada petak tujuan langkah terakhir */}
-                  {hasGame && idx > 0 && annotations[idx] && lastMove?.to && (
-                    <MoveBadgeOverlay
-                      square={lastMove.to}
-                      tag={annotations[idx]?.tag}
-                      boardSize={500}
+              <div className="board-with-eval" style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                <div className="board-stack" style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', width: 'auto' }}>
+                  {/* Top player info (Black) */}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginBottom: 6 }}>
+                    <div style={{ color: '#D1D5DB', fontWeight: 600, width: '100%', textAlign: 'left' }}>
+                      {playerNames.black}
+                      {playerElos.black ? <span style={{ marginLeft: 6, color: '#9CA3AF', fontWeight: 500 }}>({playerElos.black})</span> : null}
+                    </div>
+                    {/* Pieces lost by Black (captured by White) */}
+                    <CapturedRow caps={capturesProgress[idx]?.white} color="black" />
+                  </div>
+                  {/* Row: Evaluation bar (left) and Board (right) */}
+                  <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 8, overflow: 'visible', minWidth: boardSize + 30 + 8 }}>
+                    <EvaluationBar 
+                      evaluation={effectiveEval}
+                      sideToMove={effectiveSide}
+                      barHeight={boardSize}
+                      barWidth={30}
                     />
-                  )}
+                    <div style={{ width: `${boardSize}px`, height: `${boardSize}px`, position: 'relative', marginLeft: 0 }}>
+                      <Chessboard
+                        id="analysis-board"
+                        position={hasGame ? (fens[idx] || 'start') : 'start'}
+                        boardWidth={boardSize}
+                        arePiecesDraggable={false}
+                        showBoardNotation={true}
+                        animationDuration={300}
+                        customBoardStyle={{ borderRadius: '4px', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
+                        customSquareStyles={lastMove ? {
+                          [lastMove.from]: { backgroundColor: getHighlightColor(annotations[idx]?.tag) },
+                          [lastMove.to]: { backgroundColor: getHighlightColor(annotations[idx]?.tag) }
+                        } : {}}
+                      />
+                      {!thinking && <ArrowOverlay arrows={bestMoveArrow} boardSize={boardSize} />}
+                      {/* Ikon klasifikasi pada petak tujuan langkah terakhir */}
+                      {hasGame && idx > 0 && annotations[idx] && lastMove?.to && (
+                        <MoveBadgeOverlay
+                          square={lastMove.to}
+                          tag={annotations[idx]?.tag}
+                          boardSize={boardSize}
+                        />
+                      )}
+                    </div>
+                  </div>
+                  {/* Bottom player info (White) */}
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginTop: 6 }}>
+                    <div style={{ color: '#D1D5DB', fontWeight: 600, width: '100%', textAlign: 'left' }}>
+                      {playerNames.white}
+                      {playerElos.white ? <span style={{ marginLeft: 6, color: '#9CA3AF', fontWeight: 500 }}>({playerElos.white})</span> : null}
+                    </div>
+                    {/* Pieces lost by White (captured by Black) */}
+                    <CapturedRow caps={capturesProgress[idx]?.black} color="white" />
+                  </div>
                 </div>
               </div>
-              
+            
               {/* Navigation Controls moved to right panel bottom */}
 
             </div>
@@ -1537,7 +1971,7 @@ export default function App() {
                     
                     return (
                       <div
-                        key={i}
+                        key={`${i}-${san}-${fens[i] || ''}`}
                         className={`move-item ${idx === i + 1 ? 'active' : ''}`}
                         onClick={() => navigateToPosition(i + 1)}
                       >
@@ -1562,41 +1996,27 @@ export default function App() {
             )}
           </div>
 
-          {/* Fixed bottom navigation inside right panel */}
-          <div className="right-panel-nav">
+          {/* Fixed bottom navigation inside right panel (desktop) - always mounted, show/hide via style */}
+          <div className="right-panel-nav" style={{ display: isMobile ? 'none' : 'block' }}>
             <div className="nav-controls">
-              <button
-                className="nav-btn"
-                onClick={() => navigateToPosition(0)}
-                disabled={!hasGame}
-              >
-                ⏮
-              </button>
-              <button
-                className="nav-btn"
-                onClick={() => navigateToPosition(Math.max(0, idx - 1))}
-                disabled={!hasGame}
-              >
-                ◀
-              </button>
-              <button
-                className="nav-btn"
-                onClick={() => navigateToPosition(Math.min(fens.length - 1, idx + 1))}
-                disabled={!hasGame}
-              >
-                ▶
-              </button>
-              <button
-                className="nav-btn"
-                onClick={() => navigateToPosition(fens.length - 1)}
-                disabled={!hasGame}
-              >
-                ⏭
-              </button>
+              <button className="nav-btn" onClick={() => navigateToPosition(0)} disabled={!hasGame}>⏮</button>
+              <button className="nav-btn" onClick={() => navigateToPosition(Math.max(0, idx - 1))} disabled={!hasGame}>◀</button>
+              <button className="nav-btn" onClick={() => navigateToPosition(Math.min(fens.length - 1, idx + 1))} disabled={!hasGame}>▶</button>
+              <button className="nav-btn" onClick={() => navigateToPosition(fens.length - 1)} disabled={!hasGame}>⏭</button>
             </div>
           </div>
         </div>
       </div>
+      {/* Global fixed nav for mobile - always mounted, show/hide via style */}
+      <div className="mobile-fixed-nav" style={{ display: isMobile ? 'block' : 'none' }}>
+        <div className="nav-controls">
+          <button className="nav-btn" onClick={() => navigateToPosition(0)} disabled={!hasGame}>⏮</button>
+          <button className="nav-btn" onClick={() => navigateToPosition(Math.max(0, idx - 1))} disabled={!hasGame}>◀</button>
+          <button className="nav-btn" onClick={() => navigateToPosition(Math.min(fens.length - 1, idx + 1))} disabled={!hasGame}>▶</button>
+          <button className="nav-btn" onClick={() => navigateToPosition(fens.length - 1)} disabled={!hasGame}>⏭</button>
+        </div>
+      </div>
     </div>
+    </ErrorBoundary>
   );
 }

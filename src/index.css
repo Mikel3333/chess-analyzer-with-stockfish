@@ -1,3 +1,46 @@
+/* Local container for Quick/Deep buttons inside PGN input; minimal impact */
+.pgn-actions {
+  display: flex;
+  flex-direction: row; /* sejajar dengan textarea */
+  gap: 8px;
+  align-items: stretch;
+  flex: 0 0 auto; /* jangan melar */
+  flex-wrap: nowrap;
+}
+
+.pgn-actions .btn-analyze {
+  min-width: 96px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Kecilkan lebar textarea ketika berada di satu baris dengan tombol */
+.pgn-input-row .textarea-pgn {
+  flex: 1 1 65%; /* sekitar 65% baris untuk textarea */
+  min-width: 0;  /* hindari overflow */
+}
+
+/* Beri gap antara wrapper input PGN dan papan catur */
+.left-section .pgn-input-section {
+  margin-bottom: 10px;
+}
+
+/* Di layar kecil, kembalikan tombol menjadi vertikal */
+@media (max-width: 900px) {
+  /* Tetap horizontal di mobile, kecilkan textarea agar muat tombol */
+  .pgn-actions { flex-direction: row; }
+  .pgn-input-row .textarea-pgn { flex: 1 1 60%; }
+  .pgn-actions .btn-analyze { min-width: 88px; height: 38px; padding: 6px 10px; font-size: 12px; }
+}
+
+/* Ekstra ketat untuk layar sangat kecil */
+@media (max-width: 480px) {
+  .pgn-input-row { gap: 6px; }
+  .pgn-input-row .textarea-pgn { flex: 1 1 55%; }
+  .pgn-actions .btn-analyze { min-width: 80px; height: 36px; padding: 6px 8px; font-size: 12px; }
+}
 :root {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
   line-height: 1.5;
@@ -582,13 +625,111 @@ textarea::-webkit-scrollbar { /* WebKit */
 }
 
 .board-with-eval {
-  display: grid;
-  grid-template-columns: 30px 500px;
-  align-items: start;
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
   justify-content: center;
-  column-gap: 20px;
+  gap: 8px;
   margin-bottom: 0px;
   margin-top: 0px;
+  overflow: visible;
+}
+
+/* Responsive layout adjustments */
+@media (max-width: 900px) {
+  html, body {
+    height: auto;
+    min-height: 100vh;
+    overflow: auto; /* allow page scroll on mobile */
+  }
+  #root {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible; /* unlock root overflow */
+  }
+  .app-container {
+    height: auto;
+  }
+  .main-layout {
+    flex-direction: column;
+    height: auto;
+  }
+  .left-section {
+    height: auto;
+    overflow: visible;
+    padding: 12px;
+  }
+  .right-panel {
+    width: 100%;
+    height: auto;
+    position: relative;
+    border-left: none;
+    border-top: 1px solid #374151;
+    overflow: visible; /* allow fixed child to escape clipping */
+  }
+  .right-panel-content {
+    height: auto;
+    padding: 12px;
+    padding-bottom: 96px; /* extra space for fixed bottom nav */
+    gap: 16px;
+  }
+  .card,
+  .card.full-height,
+  .card.stats-card {
+    max-height: none;
+    overflow: visible;
+  }
+  .chart-container {
+    height: 120px;
+  }
+  .board-with-eval {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+    justify-content: center;
+  }
+  .pgn-input-row {
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .textarea-pgn {
+    height: 80px;
+    width: 100%;
+  }
+  .accuracy-wrapper {
+    gap: 8px;
+  }
+  .stat-item,
+  .accuracy-wrapper .stat-item {
+    width: 140px !important;
+    max-width: 140px !important;
+    min-width: 140px !important;
+  }
+  .nav-controls {
+    gap: 8px;
+    padding: 8px 6px;
+  }
+  .nav-btn {
+    width: 56px;
+    height: 40px;
+    font-size: 14px;
+  }
+
+  /* Fix navigation bar at bottom of viewport on mobile */
+  .right-panel-nav {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 50;
+    padding-bottom: calc(env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Provide global bottom padding so content isn't hidden under fixed nav */
+  body {
+    padding-bottom: 80px; /* roughly nav height */
+  }
 }
 
 /* Navigation Controls */
@@ -647,6 +788,17 @@ textarea::-webkit-scrollbar { /* WebKit */
   cursor: not-allowed;
   opacity: 0.6;
   transform: none;
+}
+
+/* Global mobile fixed nav host (rendered outside panels) */
+.mobile-fixed-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 60; /* above right-panel overlay */
+  background: linear-gradient(180deg, rgba(17,24,39,0) 0%, rgba(17,24,39,0.7) 30%, rgba(17,24,39,1) 70%);
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px));
 }
 
 
