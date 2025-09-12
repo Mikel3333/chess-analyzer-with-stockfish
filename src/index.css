@@ -61,6 +61,18 @@ html, body {
   overflow: hidden; /* prevent page-level scroll; use pane scrolls instead */
 }
 
+/* Hide global scrollbars while preserving scroll behavior where enabled */
+body, #root, .right-panel {
+  scrollbar-width: none;           /* Firefox */
+  -ms-overflow-style: none;        /* IE/Edge */
+}
+body::-webkit-scrollbar,
+#root::-webkit-scrollbar,
+.right-panel::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
 a {
   font-weight: 500;
   color: #646cff;
@@ -230,6 +242,22 @@ body {
   width: 0;                        /* Chrome/Safari/Opera */
   height: 0;
 }
+
+/* Hide scrollbars on left pane while keeping scroll */
+.left-section {
+  scrollbar-width: none;           /* Firefox */
+  -ms-overflow-style: none;        /* IE and old Edge */
+}
+.left-section::-webkit-scrollbar {
+  width: 0;                        /* Chrome/Safari/Opera */
+  height: 0;
+}
+
+/* Ensure main-layout itself never shows a scrollbar */
+.main-layout {
+  scrollbar-width: none;
+}
+.main-layout::-webkit-scrollbar { width: 0; height: 0; }
 
 .player-header {
   text-align: center;
@@ -801,4 +829,4 @@ textarea::-webkit-scrollbar { /* WebKit */
   padding-bottom: calc(env(safe-area-inset-bottom, 0px));
 }
 
-
+/* Landing page styles moved to src/components/landing.css */

@@ -6,6 +6,7 @@ import React, {
   useState,
   memo,
 } from "react";
+import Landing from "./components/Landing.jsx";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import { motion, AnimatePresence } from "framer-motion";
@@ -109,24 +110,32 @@ function EvaluationBar({ evaluation, sideToMove, barHeight = 500, barWidth = 30 
 }
 
 // --- Captured pieces row component ---
-function CapturedRow({ caps, color = 'white' }) {
-  // caps: { p,n,b,r,q } = jumlah bidak lawan yang berhasil ditangkap oleh 'color lawan'
-  // Tapi yang kita tampilkan di bawah nama pemain adalah "bidak yang HILANG" dari pemain tsb,
-  // jadi ikon yang ditampilkan mengikuti warna pemain itu: 'w' atau 'b'.
-  const prefix = color === 'white' ? 'w' : 'b';
+function CapturedRow({ caps, oppCaps, color = 'white' }) {
+  // Tampilkan bidak LAWAN yang berhasil ditangkap oleh pemain pada baris ini.
+  // Jadi di sisi White, tampilkan bidak hitam; di sisi Black, tampilkan bidak putih.
+  const prefix = color === 'white' ? 'b' : 'w';
   const order = ['q','r','b','n','p'];
-  const c = caps || { p:0,n:0,b:0,r:0,q:0 };
+  // Display icons from opponent pieces captured by this player
+  const c = oppCaps || { p:0,n:0,b:0,r:0,q:0 };
   const size = 16; // ukuran ikon kecil 16px
   const items = [];
   order.forEach(t => {
     const count = c[t] || 0;
     for (let i=0; i<count; i++) {
       const code = `${prefix}${t.toUpperCase()}`; // contoh: wQ, bN
-      const src = `/pieces/${code}.svg`;
+      const src = `/pieces/${code}.png`;
       items.push({ src, code, i });
     }
   });
-  if (items.length === 0) return <div style={{ minHeight: size }} />;
+  // Hitung keunggulan materi untuk pemain pada baris ini (positif jika pemain ini unggul)
+  const values = { p:1, n:3, b:3, r:5, q:9 };
+  const sumVals = (obj) => {
+    if (!obj) return 0;
+    let s = 0; for (const k of Object.keys(values)) s += (obj[k] || 0) * values[k];
+    return s;
+  };
+  // oppCaps = buah yang ditangkap oleh pemain ini, caps = buah yang hilang dari pemain ini
+  const lead = sumVals(oppCaps) - sumVals(caps);
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center', minHeight: size }}>
       {items.map((it, idx) => (
@@ -140,6 +149,9 @@ function CapturedRow({ caps, color = 'white' }) {
           loading="lazy"
         />
       ))}
+      {lead > 0 && (
+        <span style={{ marginLeft: 6, color: '#10B981', fontWeight: 700, fontSize: 13 }}>+{lead}</span>
+      )}
     </div>
   );
 }
@@ -216,6 +228,37 @@ function normalizeSan(san) {
   return String(san).replace(/[+#!?]+$/g, '').trim();
 }
 
+// --- Util: get moved piece type ('p','n','b','r','q','k') for a SAN move on a FEN ---
+function getMovedPieceType(fen, san) {
+  try {
+    const g = new Chess(fen);
+    const mv = g.move(san, { sloppy: true });
+    if (!mv) return null;
+    return mv.piece || null;
+  } catch {
+    return null;
+  }
+}
+
+// --- Util: strict piece sacrifice offer (relaxed): counts capture/exchange sacs too.
+// Thresholds (net loss after best capture/recapture on target square): Q>=5, R>=3, N/B>=2 ---
+function isStrictPieceSacrificeOffer(fen, san, moverSide) {
+  try {
+    const moved = getMovedPieceType(fen, san);
+    if (!moved || moved === 'k' || moved === 'p') return false;
+    const loss = offeredSacrificeLossMagnitude(fen, san, moverSide); // negative for mover
+    if (typeof loss !== 'number') return false;
+    // Relaxed thresholds so that realistic sacrifice (including exchange sacs) count as piece sacrifice
+    // Queen: lose at least ~half a queen value; Rook: lose ≥3; Minor: lose ≥2 after best reply/recapture sequence
+    if (moved === 'q') return loss <= -5;
+    if (moved === 'r') return loss <= -3;
+    if (moved === 'b' || moved === 'n') return loss <= -2;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 // --- Util: magnitude of offered sacrifice (pawns) if opponent captures the offered piece immediately.
 // Returns a negative number for material loss by the mover (e.g., -9 for queen), or null if no such capture.
 function offeredSacrificeLossMagnitude(fen, san, moverSide) {
@@ -228,19 +271,84 @@ function offeredSacrificeLossMagnitude(fen, san, moverSide) {
     const scoAfter = materialScore(after);
     const opponentMoves = after.moves({ verbose: true });
     const targetSquare = move.to;
+    let found = false;
+    let worstDelta = 0; // most negative for mover
     for (const om of opponentMoves) {
-      if (om.to === targetSquare && om.flags.includes('c')) {
-        const test = new Chess(after.fen());
-        test.move({ from: om.from, to: om.to, promotion: om.promotion });
-        const scoCap = materialScore(test);
-        const delta = (moverSide === 'w') ? (scoCap.w - scoAfter.w) : (scoCap.b - scoAfter.b);
-        // delta is negative when mover loses material. Return that value.
-        return delta; // e.g., -9 for a queen offer
+      if (om.to !== targetSquare || !om.flags.includes('c')) continue;
+      const afterOpp = new Chess(after.fen());
+      afterOpp.move({ from: om.from, to: om.to, promotion: om.promotion });
+      const scoAfterOpp = materialScore(afterOpp);
+
+      // Look for immediate recapture by mover on the same square
+      const recaps = afterOpp.moves({ verbose: true }).filter(rm => rm.flags.includes('c') && rm.to === targetSquare);
+      let bestAfterRecapScore = null; // best for mover (maximize mover's material)
+      for (const rm of recaps) {
+        const tmp = new Chess(afterOpp.fen());
+        tmp.move({ from: rm.from, to: rm.to, promotion: rm.promotion });
+        const sco = materialScore(tmp);
+        const val = (moverSide === 'w') ? sco.w : sco.b;
+        if (bestAfterRecapScore == null || val > bestAfterRecapScore) bestAfterRecapScore = val;
       }
+
+      const baseSideVal = (moverSide === 'w') ? scoAfter.w : scoAfter.b;
+      let delta;
+      if (bestAfterRecapScore != null) {
+        // Net loss after optimal immediate recapture
+        delta = bestAfterRecapScore - baseSideVal;
+      } else {
+        // No recapture: use post-opponent-capture value
+        const sideValAfterOpp = (moverSide === 'w') ? scoAfterOpp.w : scoAfterOpp.b;
+        delta = sideValAfterOpp - baseSideVal;
+      }
+
+      if (!found || delta < worstDelta) { worstDelta = delta; found = true; }
     }
+    if (found) return worstDelta;
     return null;
   } catch {
     return null;
+  }
+}
+
+// --- Heuristic: is there any opponent capture on the moved piece's target square? ---
+function hasOpponentCaptureOnTarget(fen, san) {
+  try {
+    const before = new Chess(fen);
+    const mv = before.move(san, { sloppy: true });
+    if (!mv) return false;
+    const after = before;
+    const targetSquare = mv.to;
+    const opponentMoves = after.moves({ verbose: true });
+    return opponentMoves.some(m => m.flags.includes('c') && m.to === targetSquare);
+  } catch {
+    return false;
+  }
+}
+
+// --- Heuristic: after opponent captures that target square, does mover have an immediate checking reply? ---
+function moverHasImmediateCheckAfterTargetCapture(fen, san, moverSide) {
+  try {
+    const before = new Chess(fen);
+    const mv = before.move(san, { sloppy: true });
+    if (!mv) return false;
+    const targetSquare = mv.to;
+    const after = before; // opponent to move
+    const opponentMoves = after.moves({ verbose: true }).filter(m => m.flags.includes('c') && m.to === targetSquare);
+    for (const om of opponentMoves) {
+      const afterOpp = new Chess(after.fen());
+      afterOpp.move({ from: om.from, to: om.to, promotion: om.promotion });
+      // now mover's turn; look for any checking move (strong forcing signal)
+      const replies = afterOpp.moves({ verbose: true });
+      for (const r of replies) {
+        const tmp = new Chess(afterOpp.fen());
+        tmp.move({ from: r.from, to: r.to, promotion: r.promotion });
+        if (tmp.in_checkmate()) return true; // mate in 1 after capture → surely brilliant
+        if (r.san && /\+/.test(r.san)) return true; // any check reply considered a strong punish
+      }
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 
@@ -582,11 +690,14 @@ export default function App() {
   const [engineReady, setEngineReady] = useState(false);
   const [thinking, setThinking] = useState(false);
   const [analyzeProgress, setAnalyzeProgress] = useState(0);
+  const [showLanding, setShowLanding] = useState(true); // tampilkan landing page di awal
 
   // Worker Stockfish (opsional)
   const workerRef = useRef(null);
   // Simple in-memory cache: key by fen + options signature
   const evalCacheRef = useRef(new Map());
+  // Debug toggle for annotation logic
+  const DEBUG_ANNOT = true;
 
   // Responsive board size based on viewport; updates on resize
   const [boardSize, setBoardSize] = useState(500);
@@ -610,7 +721,35 @@ export default function App() {
     return () => window.removeEventListener('resize', compute);
   }, []);
 
-  
+  // Use the same piece assets for both react-chessboard and captured pieces rows
+  // We map piece codes (wK, wQ, ..., bP) to <img> components that load from /public/pieces/*.png
+  const customPieces = useMemo(() => {
+    const codes = ['wK','wQ','wR','wB','wN','wP','bK','bQ','bR','bB','bN','bP'];
+    const map = {};
+    codes.forEach((code) => {
+      map[code] = ({ squareWidth }) => (
+        <div
+          style={{
+            width: '100%',
+            height: '100%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+          }}
+        >
+          <img
+            src={`/pieces/${code}.png`}
+            alt={code}
+            style={{ width: '86%', height: '86%', objectFit: 'contain' }}
+            draggable={false}
+          />
+        </div>
+      );
+    });
+    return map;
+  }, []);
+
+
 
   useEffect(() => {
     let loadingTimeout;
@@ -766,11 +905,12 @@ export default function App() {
     try {
       setError("");
       const normalized = cleanPGN(pgn);
-      const { fens: F, sans: S } = parsePgnToFens(normalized);
+      const { fens: F, sans: S, captures: C } = parsePgnToFens(normalized);
       const names = extractPlayerNames(normalized);
       setFens(F);
       setSans(S);
       setPlayerNames(names);
+      if (C) setCapturesProgress(C);
       setIdx(0);
       setEvals({});
     } catch (e) {
@@ -811,7 +951,10 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => setPgn(String(reader.result || ""));
+    reader.onload = () => {
+      setPgn(String(reader.result || ""));
+      setShowLanding(false);
+    };
     reader.readAsText(file);
   }
 
@@ -994,6 +1137,38 @@ export default function App() {
         setAnalyzeProgress((i + 1) / fenList.length);
       }
     }
+
+    // Auto-deepen verification: for strict sacrifice candidates where played move is NOT PV#1 at stable depth,
+    // run a deeper check to confirm whether it becomes PV#1. If yes, update finalEvals[i] with the deeper result.
+    try {
+      const deepDepth = Math.max((stableFinalPass ? stableDepth : depth) + 4, 18);
+      const deepMultiPV = Math.max(stableMultiPV || 5, 5);
+      for (let i = 0; i < fenList.length - 1; i++) {
+        const fen = fenList[i];
+        if (!fen || !finalEvals[i]) continue;
+        const moverSide = fen.split(' ')[1];
+        const playedSan = sans[i];
+        if (!playedSan) continue;
+        if (!isStrictPieceSacrificeOffer(fen, playedSan, moverSide)) continue;
+        // Compare with current PV#1
+        const bestUci = finalEvals[i].bestmoveUci || (Array.isArray(finalEvals[i].multipv) ? finalEvals[i].multipv.find(x => x.rank === 1)?.uci : null);
+        const bestSanNow = bestUci ? uciToSan(fen, bestUci) : null;
+        if (bestSanNow && normalizeSan(bestSanNow) === normalizeSan(playedSan)) continue; // already PV#1
+
+        // Deeper re-analysis for this position only
+        const evDeep = await analyzeFenOnce(fen, { depth: deepDepth, multiPV: deepMultiPV });
+        if (evDeep) {
+          const deepBestUci = evDeep.bestmoveUci || (Array.isArray(evDeep.multipv) ? evDeep.multipv.find(x => x.rank === 1)?.uci : null);
+          const deepBestSan = deepBestUci ? uciToSan(fen, deepBestUci) : null;
+          if (deepBestSan && normalizeSan(deepBestSan) === normalizeSan(playedSan)) {
+            finalEvals[i] = evDeep; // promote deeper verdict so annotations will mark Brilliant
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Auto-deepen verification skipped due to error:', e?.message || e);
+    }
+
     setEvals(finalEvals);
     setThinking(false);
   }, [engineReady, fens, analyzeFenOnce]);
@@ -1007,6 +1182,7 @@ export default function App() {
         return;
       }
       setError('');
+      setShowLanding(false);
       setGame(parsed.game);
       setFens(parsed.fens);
       setSans(parsed.sans);
@@ -1034,6 +1210,7 @@ export default function App() {
         return;
       }
       setError('');
+      setShowLanding(false);
       setGame(parsed.game);
       setFens(parsed.fens);
       setSans(parsed.sans);
@@ -1085,6 +1262,39 @@ export default function App() {
       setPendingAnalyze(null);
     }
   }, [engineReady, pendingAnalyze, analyzeFenOnce, fens, idx, analyzeAll]);
+
+  // Start with example PGN directly (bypass needing user to click Quick after filling)
+  const startWithExample = useCallback(() => {
+    const example = `[Event "Fool's Mate"]
+[Site "?"]
+[Date "2025.08.18"]
+[Round "?"]
+[White "Anon"]
+[Black "Anon"]
+[Result "0-1"]
+
+1. f3 e5 2. g4 Qh4# 0-1
+`;
+    try {
+      setPgn(example);
+      const parsed = parsePgnToFens(example);
+      setError('');
+      setShowLanding(false);
+      setGame(parsed.game);
+      setFens(parsed.fens);
+      setSans(parsed.sans);
+      if (parsed.headers) {
+        setPlayerNames({ white: parsed.headers.White || 'White Player', black: parsed.headers.Black || 'Black Player' });
+        setPlayerElos({ white: parsed.headers.WhiteElo || '', black: parsed.headers.BlackElo || '' });
+      }
+      if (parsed.captures) setCapturesProgress(parsed.captures);
+      setIdx(0);
+      setEvals({});
+      analyzeAll(12, parsed.fens, { fastFirstPass: true, stableFinalPass: false, movetime: 80, multiPV: 3 });
+    } catch (e) {
+      setError(e?.message || 'Gagal memulai contoh.');
+    }
+  }, [analyzeAll]);
 
   const hasGame = useMemo(() => fens.length > 0, [fens.length]);
 
@@ -1180,36 +1390,48 @@ export default function App() {
       const playedSanRaw = sans[i];
       const bestSan = normalizeSan(bestSanRaw);
       const playedSan = normalizeSan(playedSanRaw);
+      if (DEBUG_ANNOT) {
+        console.debug('[Annot]', { i, bestSanRaw, playedSanRaw, bestSan, playedSan });
+      }
 
       // If the played move equals engine best (SAN match), default to 'Best'.
-      // Upgrade to 'Brilliant' when it is a genuine offered sacrifice that yields a winning outcome.
+      // Upgrade to 'Brilliant' if it constitutes a deliberate piece sacrifice (Q/R/N/B),
+      // including capture sacrifices and exchange sacrifices, measured by net material loss
+      // after opponent's best immediate capture on the target square (with best recapture by mover):
+      // thresholds: Q>=5, R>=3, N/B>=2 pawns of net loss for the mover.
       if (bestSan && playedSan && playedSan === bestSan) {
-        // Compute sacrifice magnitude in pawn units (negative = loss for mover)
-        let sacLoss = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
-        const winningLine = (typeof bestCp === 'number' && bestCp >= 150) || ("mate" in best && Math.sign(best.mate) > 0);
-        // Also count as winning if the resulting position after the move is clearly winning for the mover
-        const playedWinning = (typeof playedCp === 'number' && playedCp >= 100) || ("mate" in after && (after.mate === 0 || Math.sign(after.mate) < 0));
-        const exchangeSac = isExchangeSacrifice(fens[i], playedSan);
+        const movedType = getMovedPieceType(fens[i], playedSan); // 'p','n','b','r','q','k'
+        let isPieceSacrifice = false;
+        let sacLoss = null; // hoist so it's available for debug logging below
+        if (movedType && movedType !== 'p' && movedType !== 'k') {
+          sacLoss = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
+          if (movedType === 'q' && sacLoss <= -5) isPieceSacrifice = true;
+          else if (movedType === 'r' && sacLoss <= -3) isPieceSacrifice = true;
+          else if ((movedType === 'n' || movedType === 'b') && sacLoss <= -2) isPieceSacrifice = true;
+          // pawn sacrifices are ignored for Brilliant per request; king is impossible
+        }
+        if (DEBUG_ANNOT) {
+          console.debug('[Annot][sac-offer]', { i, movedType, sacLoss, isPieceSacrifice });
+        }
+        tag = isPieceSacrifice ? 'Brilliant' : 'Best';
+      }
 
-        // Primary Brilliant rule: significant offered sacrifice (≥ 5 pawns, e.g., rook/queen)
-        // and the engine best indicates a winning continuation for the mover
-        if ((typeof sacLoss === 'number' && (
-              sacLoss <= -8 && (playedCp == null || playedCp > -50) // queen-level sac and not clearly losing
-            || ((winningLine || playedWinning) && sacLoss <= -5)
-          )) || (exchangeSac && (winningLine || playedWinning))) {
-          tag = 'Brilliant';
-        } else {
-          // Secondary: large PV gap implies tactical uniqueness
-          let pvGap = 0;
-          if (pvList.length >= 2) {
-            const getCp = (item) => ('mate' in item) ? mateToScore(item.mate) : (item.cp);
-            const pv1 = pvList.find(x => x.rank === 1);
-            const pv2 = pvList.find(x => x.rank === 2);
-            if (pv1 && pv2) pvGap = getCp(pv1) - getCp(pv2);
+      // Secondary upgrade: if played move is a qualifying sacrifice (same thresholds)
+      // and is very close to PV#1 (loss <= 20cp from mover's perspective), treat as Brilliant.
+      if (tag !== 'Brilliant' && playedSan) {
+        const movedType3 = getMovedPieceType(fens[i], playedSan);
+        if (movedType3 && movedType3 !== 'p' && movedType3 !== 'k') {
+          const sacLoss3 = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
+          const qualifies = (movedType3 === 'q' && sacLoss3 <= -5) ||
+                           (movedType3 === 'r' && sacLoss3 <= -3) ||
+                           ((movedType3 === 'n' || movedType3 === 'b') && sacLoss3 <= -2);
+          const nearBest = (bestCp != null && playedCp != null && ((bestCp - playedCp) <= 20));
+          if (DEBUG_ANNOT) {
+            console.debug('[Annot][sac-nearBest]', { i, movedType3, sacLoss3, qualifies, bestCp, playedCp });
           }
-          // Secondary upgrade: allow exchange-level sac (<= -2) if unik (PV gap besar) atau terdeteksi exchangeSac
-          const significantSacPVGap = (typeof sacLoss === 'number' && sacLoss <= -2) || exchangeSac;
-          tag = (significantSacPVGap && pvGap >= 150) ? 'Brilliant' : 'Best';
+          if (qualifies && nearBest) {
+            tag = 'Brilliant';
+          }
         }
       }
 
@@ -1231,39 +1453,76 @@ export default function App() {
       }
 
       if (onlyMove && playedSan === bestSan) {
-        const offeredNow = offersSacrificeNextMove(fens[i], playedSan, moverSide);
-        const sacLossOnly = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
-        const exchangeSac = isExchangeSacrifice(fens[i], playedSan);
-        const significantSac = exchangeSac || (typeof sacLossOnly === 'number' ? (sacLossOnly <= -2) : false); // exchange-level allowed
-        const notClearlyLosing = (playedCp == null || playedCp > -50);
-        if (tag !== 'Brilliant') {
-          tag = ( (offeredNow || significantSac) && notClearlyLosing) ? 'Brilliant' : 'Great';
+        // Do NOT auto-upgrade to Brilliant di sini; tetap 'Great' kecuali aturan sacrifice ketat di atas sudah set Brilliant.
+        if (tag !== 'Brilliant' && tag !== 'Best') {
+          tag = 'Great';
         }
       }
 
-      // Fallback Brilliant (DEFINISI BARU): HANYA berlaku jika langkah yang dimainkan adalah PV#1 (best move).
-      // Tidak akan mempromosikan menjadi Brilliant untuk langkah yang bukan PV#1, meskipun ada sacrifice.
+      // Heuristik tambahan: jika langkah = PV#1 dan tampak seperti "offer" (lawan bisa makan di kotak target)
+      // dan setelah capture itu pelaku punya balasan cek langsung, anggap Brilliant untuk N/B/R/Q.
       if (tag !== 'Brilliant' && bestSan && playedSan && playedSan === bestSan) {
-        try {
-          const sacLoss2 = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
-          const exchangeSac2 = isExchangeSacrifice(fens[i], playedSan);
-          const winningLine2 = (typeof bestCp === 'number' && bestCp >= 150) || ("mate" in best && Math.sign(best.mate) > 0);
-          const playedWinning2 = (typeof playedCp === 'number' && playedCp >= 100) || ("mate" in after && (after.mate === 0 || Math.sign(after.mate) < 0));
-          if ((typeof sacLoss2 === 'number' && (
-                (sacLoss2 <= -8 && (playedWinning2 || (playedCp == null || playedCp > -50)))
-              || ((winningLine2 || playedWinning2) && sacLoss2 <= -2) // allow exchange-level in winning context
-            )) || (exchangeSac2 && (winningLine2 || playedWinning2))) {
+        const movedType2 = getMovedPieceType(fens[i], playedSan);
+        if (movedType2 && movedType2 !== 'p' && movedType2 !== 'k') {
+          const capOnTarget = hasOpponentCaptureOnTarget(fens[i], playedSan);
+          const checkAfter = moverHasImmediateCheckAfterTargetCapture(fens[i], playedSan, moverSide);
+          if (DEBUG_ANNOT) {
+            console.debug('[Annot][offer+check]', { i, movedType2, capOnTarget, checkAfter });
+          }
+          if (capOnTarget && checkAfter) {
             tag = 'Brilliant';
-          } else if (sacLoss2 == null) {
-            // very strict last resort using global worst capture: only queen-level and clear winning after
-            const worst = worstImmediateCaptureLoss(fens[i], playedSan, moverSide);
-            if (typeof worst === 'number' && worst <= -9 && (playedWinning2 || (playedCp == null || playedCp > -30))) {
+          }
+        }
+      }
+
+      // Additional heuristic: For knight moves that are best moves and can be captured,
+      // if the knight sacrifice leads to a significant positional advantage or tactical sequence,
+      // mark as Brilliant even if material calculation doesn't meet strict thresholds
+      if (tag !== 'Brilliant' && bestSan && playedSan && playedSan === bestSan) {
+        const movedType4 = getMovedPieceType(fens[i], playedSan);
+        if (movedType4 === 'n') { // specifically for knight moves
+          const capOnTarget = hasOpponentCaptureOnTarget(fens[i], playedSan);
+          if (capOnTarget) {
+            // Check if this is a true sacrifice (knight can be taken for less than its value)
+            const sacLoss4 = offeredSacrificeLossMagnitude(fens[i], playedSan, moverSide);
+            // For knights, be more lenient - if there's any material loss and it's the best move,
+            // and the evaluation is still good for the player, consider it brilliant
+            if (sacLoss4 != null && sacLoss4 < 0 && bestCp != null && bestCp > -50) {
+              if (DEBUG_ANNOT) {
+                console.debug('[Annot][knight-sac]', { i, sacLoss4, bestCp, playedCp });
+              }
               tag = 'Brilliant';
             }
           }
-        } catch {}
+        }
       }
 
+      // Fallback yang lebih kuat: jika langkah = PV#1 dan ada kehilangan materi langsung
+      // setelah langkah ini (bisa ditangkap di mana pun) menurut worstImmediateCaptureLoss,
+      // maka terapkan ambang sacrifice yang sama untuk promosi ke "Brilliant".
+      if (tag !== 'Brilliant' && bestSan && playedSan && playedSan === bestSan) {
+        const movedType5 = getMovedPieceType(fens[i], playedSan);
+        if (movedType5 && movedType5 !== 'p' && movedType5 !== 'k') {
+          const worstLoss = worstImmediateCaptureLoss(fens[i], playedSan, moverSide); // negatif untuk pelaku
+          if (DEBUG_ANNOT) {
+            console.debug('[Annot][worst-loss-fallback]', { i, movedType5, worstLoss });
+          }
+          if (typeof worstLoss === 'number') {
+            const qualifies = (movedType5 === 'q' && worstLoss <= -5) ||
+                              (movedType5 === 'r' && worstLoss <= -3) ||
+                              ((movedType5 === 'n' || movedType5 === 'b') && worstLoss <= -2);
+            if (qualifies) {
+              tag = 'Brilliant';
+            }
+          }
+        }
+      }
+
+      // Remove broad fallback Brilliant logic. We already applied the strict rule above (best move + real piece sacrifice).
+
+      if (DEBUG_ANNOT) {
+        console.debug('[Annot][final]', { i, tag, deltaCp });
+      }
       if (tag) ann[i + 1] = { mover: moverSide === 'w' ? 'White' : 'Black', tag, delta: (deltaCp / 100) };
     }
     return ann;
@@ -1419,162 +1678,41 @@ export default function App() {
       // Track good move ratio for consistency bonus separately (>=92%)
       if (moveAccuracy >= 92) stats[player].goodMoves++;
     }
-
     // Finalize accuracy as percentage
     ['white', 'black'].forEach(color => {
       if (stats[color].totalMoves > 0) {
         stats[color].accuracy = stats[color].accuracy / stats[color].totalMoves;
-        const goodMoveRatio = stats[color].goodMoves / stats[color].totalMoves;
-
-        // Game rating removed
       }
     });
 
     return stats;
-  }, [fens, evals]);
+  }, [fens, evals, sans]);
 
-  // Custom arrow overlay component since react-chessboard may not support arrows
-  const ArrowOverlay = ({ arrows, boardSize = 400 }) => {
-    if (!arrows || arrows.length === 0) return null;
-
-    const squareSize = boardSize / 8;
-    
-    const getSquarePosition = (square) => {
-      const file = square.charCodeAt(0) - 'a'.charCodeAt(0); // 0-7
-      const rank = parseInt(square[1]) - 1; // 0-7
-      return {
-        x: file * squareSize + squareSize / 2,
-        y: (7 - rank) * squareSize + squareSize / 2
-      };
+  // Aggregate counts for Move Quality Summary (white | icon | black)
+  const moveTypeCounts = useMemo(() => {
+    const base = {
+      brilliant: 0,
+      great: 0,
+      best: 0,
+      excellent: 0,
+      good: 0,
+      inaccuracy: 0,
+      miss: 0,
+      mistake: 0,
+      blunder: 0,
     };
-
-    return (
-      <div style={{ position: 'absolute', top: 0, left: 0, width: boardSize, height: boardSize, pointerEvents: 'none', zIndex: 10 }}>
-        <svg width={boardSize} height={boardSize}>
-          <defs>
-            <marker
-              id="arrowhead"
-              markerWidth="10"
-              markerHeight="7"
-              refX="9"
-              refY="3.5"
-              orient="auto"
-            >
-              <polygon
-                points="0 0, 10 3.5, 0 7"
-                fill="rgba(0, 128, 0, 0.8)"
-              />
-            </marker>
-          </defs>
-          {arrows.map((arrow, index) => {
-            const from = typeof arrow === 'string' ? arrow.slice(0, 2) : arrow.from;
-            const to = typeof arrow === 'string' ? arrow.slice(2, 4) : arrow.to;
-            
-            const fromPos = getSquarePosition(from);
-            const toPos = getSquarePosition(to);
-            
-            return (
-              <line
-                key={`${from}-${to}-${index}`}
-                x1={fromPos.x}
-                y1={fromPos.y}
-                x2={toPos.x}
-                y2={toPos.y}
-                stroke="rgba(0, 128, 0, 0.8)"
-                strokeWidth="4"
-                markerEnd="url(#arrowhead)"
-              />
-            );
-          })}
-        </svg>
-      </div>
-    );
-  };
-
-  // Best move arrow untuk current position
-  const bestMoveArrow = useMemo(() => {
-    if (!hasGame || !fens[idx]) return [];
-    
-    const currentEval = evals[idx];
-    if (!currentEval || !currentEval.bestmoveUci) return [];
-    
-    const uci = currentEval.bestmoveUci;
-    if (uci.length < 4) return [];
-    
-    // Hanya tampilkan panah jika ada langkah selanjutnya dan berbeda dari best move
-    if (idx < sans.length) {
-      const playedSan = sans[idx];
-      const bestSan = uciToSan(fens[idx], uci);
-      
-      console.log('[Arrow Debug] idx:', idx, 'played:', playedSan, 'best:', bestSan, 'bestUci:', uci);
-      
-      // Jika langkah yang dimainkan sama dengan best move, jangan tampilkan panah
-      if (playedSan === bestSan) {
-        console.log('[Arrow Debug] Played move matches best move, hiding arrow');
-        return [];
+    const res = { white: { ...base }, black: { ...base } };
+    Object.entries(annotations || {}).forEach(([ply, ann]) => {
+      if (!ann || !ann.tag) return;
+      const color = (ann.mover || '').toLowerCase(); // 'white' | 'black'
+      const key = String(ann.tag).toLowerCase();
+      if (res[color] && key in res[color]) {
+        res[color][key] += 1;
       }
-    }
-    
-    const from = uci.slice(0, 2);
-    const to = uci.slice(2, 4);
-    
-    // Try multiple arrow formats for compatibility
-    const arrowFormats = [
-      // Format 1: Standard object format
-      [{
-        from,
-        to,
-        color: 'rgba(0, 128, 0, 0.8)'
-      }],
-      // Format 2: Array format [from, to, color]
-      [[from, to, 'rgba(0, 128, 0, 0.8)']],
-      // Format 3: String format
-      [`${from}${to}`]
-    ];
-    
-    const selectedFormat = arrowFormats[0]; // Use first format
-    console.log('[Arrow Debug] Showing arrow from', from, 'to', to, 'format:', selectedFormat);
-    
-    return selectedFormat;
-  }, [hasGame, fens, idx, evals, sans]);
+    });
 
-  // Use last known evaluation to avoid the bar snapping to center while new eval is pending
-  const { effectiveEval, effectiveSide } = useMemo(() => {
-    const currFen = fens[idx];
-    const prevFen = fens[idx - 1];
-    const currEval = evals[idx];
-    const prevEval = evals[idx - 1];
-
-    // Terminal override: if current position is already a checkmate/stalemate, show that immediately
-    if (currFen) {
-      const term = getTerminalEval(currFen);
-      if (term) {
-        return { effectiveEval: term, effectiveSide: currFen.split(' ')[1] };
-      }
-    }
-
-    if (currEval && currFen) {
-      return { effectiveEval: currEval, effectiveSide: currFen.split(' ')[1] };
-    }
-
-    // Fallback: neutral until current analysis arrives (do not carry previous eval)
-    return { effectiveEval: null, effectiveSide: (currFen?.split(' ')[1]) || 'w' };
-  }, [evals, fens, idx]);
-
-  // Terminal position override: if FEN is checkmate/stalemate, produce an immediate evaluation
-  function getTerminalEval(fen) {
-    try {
-      const g = new Chess(fen);
-      if (g.isCheckmate()) {
-        // mate already on board; our EvaluationBar treats mate:0 specially (winner = side that just moved)
-        return { mate: 0 };
-      }
-      if (g.isStalemate()) {
-        return { cp: 0 };
-      }
-    } catch {}
-    return null;
-  }
+    return res;
+  }, [annotations, fens.length]);
 
   // --- Util: path ikon anotasi dari folder public/moveIcon/ ---
   function getMoveIconPath(tag) {
@@ -1620,38 +1758,140 @@ export default function App() {
     }
   }
 
-  // --- Overlay: icon klasifikasi di pojok kanan atas petak tujuan langkah terakhir ---
+  // Terminal position override: if FEN is checkmate/stalemate, produce an immediate evaluation
+  function getTerminalEval(fen) {
+    try {
+      const g = new Chess(fen);
+      if (g.isCheckmate()) {
+        // mate already on board; our EvaluationBar treats mate:0 specially (winner = side that just moved)
+        return { mate: 0 };
+      }
+      if (g.isStalemate()) {
+        return { cp: 0 };
+      }
+    } catch {}
+    return null;
+  }
+
+  // Custom arrow overlay component since react-chessboard may not support arrows
+  const ArrowOverlay = ({ arrows, boardSize = 400 }) => {
+    if (!arrows || arrows.length === 0) return null;
+
+    const squareSize = boardSize / 8;
+    const getSquarePosition = (square) => {
+      const file = square.charCodeAt(0) - 'a'.charCodeAt(0);
+      const rank = parseInt(square[1], 10) - 1;
+      return {
+        x: file * squareSize + squareSize / 2,
+        y: (7 - rank) * squareSize + squareSize / 2,
+      };
+    };
+
+    return (
+      <div style={{ position: 'absolute', top: 0, left: 0, width: boardSize, height: boardSize, pointerEvents: 'none', zIndex: 10 }}>
+        <svg width={boardSize} height={boardSize}>
+          <defs>
+            <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+              <polygon points="0 0, 10 3.5, 0 7" fill="rgba(0, 128, 0, 0.8)" />
+            </marker>
+          </defs>
+          {arrows.map((arrow, index) => {
+            const from = typeof arrow === 'string' ? arrow.slice(0, 2) : arrow.from;
+            const to = typeof arrow === 'string' ? arrow.slice(2, 4) : arrow.to;
+            const fromPos = getSquarePosition(from);
+            const toPos = getSquarePosition(to);
+            return (
+              <line
+                key={`${from}-${to}-${index}`}
+                x1={fromPos.x}
+                y1={fromPos.y}
+                x2={toPos.x}
+                y2={toPos.y}
+                stroke="rgba(0, 128, 0, 0.8)"
+                strokeWidth="4"
+                markerEnd="url(#arrowhead)"
+              />
+            );
+          })}
+        </svg>
+      </div>
+    );
+  };
+
+  // Best move arrow for current position
+  const bestMoveArrow = useMemo(() => {
+    if (!hasGame || !fens[idx]) return [];
+    const currentEval = evals[idx];
+    if (!currentEval || !currentEval.bestmoveUci) return [];
+    const uci = currentEval.bestmoveUci;
+    if (uci.length < 4) return [];
+
+    // Hide arrow if played move equals best move
+    if (idx < sans.length) {
+      const playedSan = sans[idx];
+      const bestSan = uciToSan(fens[idx], uci);
+      if (playedSan && bestSan && normalizeSan(playedSan) === normalizeSan(bestSan)) {
+        return [];
+      }
+    }
+
+    const from = uci.slice(0, 2);
+    const to = uci.slice(2, 4);
+    return [{ from, to, color: 'rgba(0, 128, 0, 0.8)' }];
+  }, [hasGame, fens, idx, evals, sans]);
+
+  // Use last known evaluation to avoid bar snapping to center while new eval is pending
+  const { effectiveEval, effectiveSide } = useMemo(() => {
+    const currFen = fens[idx];
+    const currEval = evals[idx];
+    // Terminal override
+    if (currFen) {
+      const term = getTerminalEval(currFen);
+      if (term) return { effectiveEval: term, effectiveSide: currFen.split(' ')[1] };
+    }
+    if (currEval && currFen) {
+      return { effectiveEval: currEval, effectiveSide: currFen.split(' ')[1] };
+    }
+    return { effectiveEval: null, effectiveSide: (currFen?.split(' ')[1]) || 'w' };
+  }, [evals, fens, idx]);
+
+  // --- Overlay: classification icon in the top-right of last move target square ---
   function MoveBadgeOverlay({ square, tag, boardSize = 500 }) {
     if (!square || !tag) return null;
     const icon = getMoveIconPath(tag);
     if (!icon) return null;
-
     const squareSize = boardSize / 8;
-    
-    // Get top-left coordinates of a square
     const getSquareTopLeft = (sq) => {
-      const file = sq.charCodeAt(0) - 'a'.charCodeAt(0); // 0..7
-      const rank = parseInt(sq[1], 10) - 1;               // 0..7 (rank 1=0)
+      const file = sq.charCodeAt(0) - 'a'.charCodeAt(0);
+      const rank = parseInt(sq[1], 10) - 1;
       const x = file * squareSize;
       const y = (7 - rank) * squareSize;
       return { x, y };
     };
-
     const { x, y } = getSquareTopLeft(square);
-    const size = 42;        // px
-    const inset = -15;         // distance from the square edges (inside)
-    const left = x + squareSize - size - inset; // right side inside the square
-    const top = y + inset;                      // top inside the square
-
+    const size = 42;
+    const inset = -15;
+    const left = x + squareSize - size - inset;
+    const top = y + inset;
     return (
       <div style={{ position: 'absolute', pointerEvents: 'none', left: 0, top: 0, width: boardSize, height: boardSize, zIndex: 11 }}>
-        <img
-          src={icon}
-          alt={tag}
-          title={tag}
-          style={{ position: 'absolute', left, top, width: size, height: size, borderRadius: '50%', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.28))' }}
-        />
+        <img src={icon} alt={tag} title={tag} style={{ position: 'absolute', left, top, width: size, height: size, borderRadius: '50%', filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.28))' }} />
       </div>
+    );
+  }
+
+  // ... (rest of the code remains the same)
+
+  // Conditional render: Landing or Analyzer
+  if (showLanding) {
+    return (
+      <ErrorBoundary>
+        <Landing
+          onSkip={() => setShowLanding(false)}
+          onStart={() => setShowLanding(false)}
+          onStartExample={startWithExample}
+        />
+      </ErrorBoundary>
     );
   }
 
@@ -1733,7 +1973,11 @@ export default function App() {
                       {playerElos.black ? <span style={{ marginLeft: 6, color: '#9CA3AF', fontWeight: 500 }}>({playerElos.black})</span> : null}
                     </div>
                     {/* Pieces lost by Black (captured by White) */}
-                    <CapturedRow caps={capturesProgress[idx]?.white} color="black" />
+                    <CapturedRow
+                      caps={capturesProgress[idx]?.white}
+                      oppCaps={capturesProgress[idx]?.black}
+                      color="black"
+                    />
                   </div>
                   {/* Row: Evaluation bar (left) and Board (right) */}
                   <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'flex-start', gap: 8, overflow: 'visible', minWidth: boardSize + 30 + 8 }}>
@@ -1751,6 +1995,7 @@ export default function App() {
                         arePiecesDraggable={false}
                         showBoardNotation={true}
                         animationDuration={300}
+                        customPieces={customPieces}
                         customBoardStyle={{ borderRadius: '4px', boxShadow: '0 2px 10px rgba(0,0,0,0.5)' }}
                         customSquareStyles={lastMove ? {
                           [lastMove.from]: { backgroundColor: getHighlightColor(annotations[idx]?.tag) },
@@ -1775,7 +2020,11 @@ export default function App() {
                       {playerElos.white ? <span style={{ marginLeft: 6, color: '#9CA3AF', fontWeight: 500 }}>({playerElos.white})</span> : null}
                     </div>
                     {/* Pieces lost by White (captured by Black) */}
-                    <CapturedRow caps={capturesProgress[idx]?.black} color="white" />
+                    <CapturedRow
+                      caps={capturesProgress[idx]?.black}
+                      oppCaps={capturesProgress[idx]?.white}
+                      color="white"
+                    />
                   </div>
                 </div>
               </div>
@@ -1835,27 +2084,58 @@ export default function App() {
               </div>
             </div>
 
-            {/* Engine Status */}
-            <div className="card">
-              <div className="engine-status">
-                <span className="engine-label">Engine Status</span>
-                {engineReady ? (
-                  <span className="status-badge status-ready">
-                    Ready
-                  </span>
-                ) : (
-                  <span className="status-badge status-loading">
-                    Loading...
-                  </span>
-                )}
-              </div>
-              
-              {thinking && (
-                <div className="progress-bar">
-                  <div className="progress-fill" style={{ width: `${Math.round(analyzeProgress * 100)}%`, animation: 'none', transition: 'width 200ms ease' }}></div>
+            {/* Move Type Summary (White | Icon | Black) */}
+            {hasGame && (
+              <div className="card stats-card">
+                <h3 className="card-title">Report</h3>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {[
+                    { key: 'brilliant', label: 'Brilliant', color: '#08FDFF' },
+                    { key: 'great', label: 'Great', color: '#32ADFF' },
+                    { key: 'best', label: 'Best', color: '#00F227' },
+                    { key: 'excellent', label: 'Excellent', color: '#00F227' },
+                    { key: 'good', label: 'Good', color: '#6FE47C' },
+                    { key: 'inaccuracy', label: 'Inaccuracy', color: '#FFEC6C' },
+                    { key: 'miss', label: 'Miss', color: '#FF8088' },
+                    { key: 'mistake', label: 'Mistake', color: '#FFB278' },
+                    { key: 'blunder', label: 'Blunder', color: '#FF0B07' },
+                  ].map((row) => {
+                    const icon = getMoveIconPath(row.label);
+                    return (
+                      <div
+                        key={row.key}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '1fr auto 1fr',
+                          alignItems: 'center',
+                          gap: 12,
+                        }}
+                      >
+                        <div style={{ textAlign: 'left', fontWeight: 700, color: row.color }}>
+                          {moveTypeCounts.white[row.key]}
+                        </div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 0, justifyContent: 'center' }}>
+                          {icon && (
+                            <img
+                              src={icon}
+                              alt={row.label}
+                              title={row.label}
+                              width={38}
+                              height={38}
+                              style={{ display: 'block' }}
+                            />
+                          )}
+                          <span style={{ color: row.color, fontWeight: 600 }}>{row.label}</span>
+                        </div>
+                        <div style={{ textAlign: 'right', fontWeight: 700, color: row.color }}>
+                          {moveTypeCounts.black[row.key]}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             {/* Evaluation Chart */}
             {hasGame && chartData.length > 0 && !thinking && (
